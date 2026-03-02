@@ -54,6 +54,84 @@ INTENT_LABELS = {
     "en": {"content_creation": "Content Creation", "release_build": "Build & Release", "debugging": "Debugging", "code_implementation": "Implementation", "tooling_config": "Tooling Config", "quick_question": "Quick Questions", "other": "Other"},
 }
 
+# Karpathy Agentic Engineering 评分标准
+KARPATHY_AGENTIC_CRITERIA = {
+    "zh": [
+        {
+            "id": "orchestration",
+            "name": "编排能力 (Orchestration)",
+            "description": "从'写代码'转变为'编排 AI Agent'，设计工作流程、分解任务",
+            "source": "Karpathy: 'The future of engineering management: orchestrating AI agents, not writing code'",
+            "indicators": ["规划信号", "任务分解", "多步骤执行"],
+        },
+        {
+            "id": "explore_before_code",
+            "name": "先探索后编码 (Explore First)",
+            "description": "编码前进行搜索和探索，了解上下文和现有方案",
+            "source": "Karpathy workflow: prioritizes web search and exploration before coding",
+            "indicators": ["搜索/查阅", "调研", "对比方案"],
+        },
+        {
+            "id": "quality_oversight",
+            "name": "质量监督 (Oversight)",
+            "description": "'Oversight and scrutiny are no longer optional'，建立验证机制",
+            "source": "Karpathy: 'Agents are now part of the default workflow. Oversight and scrutiny are no longer optional'",
+            "indicators": ["验证信号", "测试", "代码审查"],
+        },
+        {
+            "id": "first_pass",
+            "name": "一次达成 (First-Pass)",
+            "description": "避免返工，第一次就做对，体现清晰的任务理解",
+            "source": "Agentic Engineering vs Vibe Coding: leverage without sacrificing software quality",
+            "indicators": ["无返工信号", "一次完成", "明确验收标准"],
+        },
+        {
+            "id": "parallel_agents",
+            "name": "并行 Agent (Parallel)",
+            "description": "同时运行多个 coding agent 处理不同任务，使用 git worktree",
+            "source": "Karpathy workflow: parallel coding agents with git worktrees",
+            "indicators": ["多项目切换", "并发会话", "工具多样性"],
+        },
+    ],
+    "en": [
+        {
+            "id": "orchestration",
+            "name": "Orchestration",
+            "description": "Shift from 'writing code' to 'orchestrating AI agents', designing workflows and task decomposition",
+            "source": "Karpathy: 'The future of engineering management: orchestrating AI agents, not writing code'",
+            "indicators": ["planning signals", "task decomposition", "multi-step execution"],
+        },
+        {
+            "id": "explore_before_code",
+            "name": "Explore Before Code",
+            "description": "Search and explore before coding, understand context and existing solutions",
+            "source": "Karpathy workflow: prioritizes web search and exploration before coding",
+            "indicators": ["search/research", "investigation", "solution comparison"],
+        },
+        {
+            "id": "quality_oversight",
+            "name": "Quality Oversight",
+            "description": "'Oversight and scrutiny are no longer optional', establish verification mechanisms",
+            "source": "Karpathy: 'Agents are now part of the default workflow. Oversight and scrutiny are no longer optional'",
+            "indicators": ["verification signals", "testing", "code review"],
+        },
+        {
+            "id": "first_pass",
+            "name": "First-Pass Completion",
+            "description": "Avoid rework, get it right the first time, demonstrate clear task understanding",
+            "source": "Agentic Engineering vs Vibe Coding: leverage without sacrificing software quality",
+            "indicators": ["no rework signals", "one-shot completion", "clear acceptance criteria"],
+        },
+        {
+            "id": "parallel_agents",
+            "name": "Parallel Agents",
+            "description": "Run multiple coding agents simultaneously for different tasks using git worktrees",
+            "source": "Karpathy workflow: parallel coding agents with git worktrees",
+            "indicators": ["multi-project switching", "concurrent sessions", "tool diversity"],
+        },
+    ],
+}
+
 OUTCOME_LABELS = {
     "zh": {"fully_achieved": "完全达成", "mostly_achieved": "基本达成", "partially_achieved": "部分达成", "not_achieved": "未达成", "unclear": "不明确"},
     "en": {"fully_achieved": "Fully Achieved", "mostly_achieved": "Mostly Achieved", "partially_achieved": "Partially Achieved", "not_achieved": "Not Achieved", "unclear": "Unclear"},
@@ -239,7 +317,8 @@ class EvidenceData:
     patterns: dict[str, Any] = field(default_factory=dict)
     insights: list[str] = field(default_factory=list)
     raw_counts: dict[str, Any] = field(default_factory=dict)
-    session_samples: list[dict[str, Any]] = field(default_factory=list)  # 抽样复盘数据
+    session_samples: list[dict[str, Any]] = field(default_factory=list)
+    karpathy_score: dict[str, Any] = field(default_factory=dict)  # Karpathy Agentic 评分
 
 
 def parse_iso(value: str | None) -> datetime | None:
@@ -748,6 +827,76 @@ def calc_grade(total_score: int, locale: str) -> str:
     return tr["grade_d"]
 
 
+def calculate_karpathy_agentic_score(data: AggregatedData, locale: str) -> dict[str, Any]:
+    """
+    基于 Karpathy 的 Agentic Engineering 理念计算评分
+    原文出处：Karpathy 关于 Agentic Coding 的推文和演讲
+    """
+    total_messages = max(1, data.total_user_messages)
+    total_sessions = max(1, data.total_sessions)
+    
+    # 1. 编排能力 (Orchestration) - 基于规划信号和任务分解
+    planning_rate = safe_div(data.planning_signals, total_messages)
+    orchestration_score = min(100, int(planning_rate * 200))  # 20% planning = 40分，目标50%
+    
+    # 2. 先探索后编码 (Explore First) - 基于搜索/调研信号
+    # 通过 intent 分布间接判断：quick_question + debugging 占比高可能说明探索不足
+    explore_intents = data.intent_counts.get("quick_question", 0) + data.intent_counts.get("debugging", 0)
+    implementation_intents = data.intent_counts.get("code_implementation", 0) + data.intent_counts.get("release_build", 0)
+    explore_ratio = safe_div(explore_intents, explore_intents + implementation_intents)
+    # 探索 : 实现 的理想比例约为 1:3
+    explore_score = min(100, int((1 - explore_ratio) * 150)) if explore_ratio < 0.5 else max(0, int(100 - (explore_ratio - 0.3) * 200))
+    
+    # 3. 质量监督 (Oversight) - 基于验证信号
+    verification_rate = safe_div(data.verification_signals, total_messages)
+    oversight_score = min(100, int(verification_rate * 400))  # 25% verification = 100分
+    
+    # 4. 一次达成 (First-Pass) - 基于返工信号
+    followup_rate = safe_div(data.followup_signals, total_messages)
+    first_pass_score = max(0, int(100 - followup_rate * 200))  # 返工率越低越好
+    
+    # 5. 并行 Agent (Parallel) - 基于工具多样性和项目分布
+    avg_tool_diversity = avg(data.session_tool_diversities)
+    project_count = len(data.project_counts)
+    parallel_score = min(100, int(avg_tool_diversity * 15) + min(40, project_count * 5))
+    
+    # 总分
+    total_score = int((orchestration_score + explore_score + oversight_score + first_pass_score + parallel_score) / 5)
+    
+    criteria = KARPATHY_AGENTIC_CRITERIA[locale]
+    
+    return {
+        "total_score": total_score,
+        "grade": "A" if total_score >= 85 else "B" if total_score >= 70 else "C" if total_score >= 55 else "D",
+        "dimensions": [
+            {"id": "orchestration", "name": criteria[0]["name"], "score": orchestration_score, 
+             "weight": 20, "source": criteria[0]["source"]},
+            {"id": "explore_first", "name": criteria[1]["name"], "score": explore_score,
+             "weight": 20, "source": criteria[1]["source"]},
+            {"id": "oversight", "name": criteria[2]["name"], "score": oversight_score,
+             "weight": 20, "source": criteria[2]["source"]},
+            {"id": "first_pass", "name": criteria[3]["name"], "score": first_pass_score,
+             "weight": 20, "source": criteria[3]["source"]},
+            {"id": "parallel", "name": criteria[4]["name"], "score": parallel_score,
+             "weight": 20, "source": criteria[4]["source"]},
+        ],
+        "raw_metrics": {
+            "planning_rate": planning_rate,
+            "verification_rate": verification_rate,
+            "followup_rate": followup_rate,
+            "avg_tool_diversity": avg_tool_diversity,
+            "project_count": project_count,
+        },
+        "interpretation": {
+            "orchestration": "High planning signals indicate good task decomposition" if planning_rate > 0.2 else "Need more explicit task planning",
+            "explore_first": "Good balance of exploration vs implementation" if 0.2 < explore_ratio < 0.5 else "May need more upfront exploration",
+            "oversight": "Strong verification habits" if verification_rate > 0.25 else "Consider adding more verification steps",
+            "first_pass": "Excellent first-pass completion" if followup_rate < 0.15 else "High rework rate, consider clearer requirements",
+            "parallel": "Good use of parallel workflows" if avg_tool_diversity > 3 else "Could benefit from more parallel agent usage",
+        }
+    }
+
+
 def build_assessment(locale: str, data: AggregatedData) -> tuple[UsageAssessment, EvidenceData]:
     """构建评估和证据数据"""
     tr = I18N[locale]
@@ -864,7 +1013,8 @@ def build_assessment(locale: str, data: AggregatedData) -> tuple[UsageAssessment
             "active_days": data.total_active_days, "verification_signals": data.verification_signals,
             "planning_signals": data.planning_signals, "followup_signals": data.followup_signals,
             "outcomes": dict(data.outcome_counts), "friction": dict(data.friction_counts),
-        }
+        },
+        karpathy_score=calculate_karpathy_agentic_score(data, locale)
     )
 
     strengths, weaknesses, next_steps = [], [], []
@@ -1081,16 +1231,48 @@ def generate_evidence_json(evidence: EvidenceData, output_path: Path) -> None:
             "top_tools": evidence.patterns.get("top_tools", []),
         },
         "raw_counts": evidence.raw_counts,
-        "session_samples": evidence.session_samples,  # 抽样复盘数据
+        "session_samples": evidence.session_samples,
+        "karpathy_agentic_score": evidence.karpathy_score,  # Karpathy 评分
         "analysis_prompt": """
 基于以上证据数据，请进行 Agentic 深度分析：
 
-1. **核心洞察**: 从数据中发现的最重要 3 个使用模式或问题
-2. **优势强化**: 基于高分维度，建议如何进一步放大优势
-3. **改进优先级**: 基于低分维度，给出具体可执行的改进步骤
-4. **抽样复盘**: 分析最近20个session样本中的具体行为模式
+## 1. 通用分析
+- **核心洞察**: 从数据中发现的最重要 3 个使用模式或问题
+- **优势强化**: 基于高分维度，建议如何进一步放大优势  
+- **改进优先级**: 基于低分维度，给出具体可执行的改进步骤
 
-请用简洁的语言给出可执行的建议。
+## 2. Karpathy Agentic Engineering 评估 (模拟 Andrej Karpathy 打分)
+请基于以下 5 个维度进行评估，每个维度标注原文出处：
+
+1. **编排能力 (Orchestration)** 
+   - 原文: "The future of engineering management: orchestrating AI agents, not writing code"
+   - 评分: X/100
+   - 评价: ...
+
+2. **先探索后编码 (Explore Before Code)**
+   - 原文: "prioritizes web search and exploration before coding"
+   - 评分: X/100
+   - 评价: ...
+
+3. **质量监督 (Quality Oversight)**
+   - 原文: "Oversight and scrutiny are no longer optional"
+   - 评分: X/100
+   - 评价: ...
+
+4. **一次达成 (First-Pass)**
+   - 原文: "leverage without sacrificing software quality"
+   - 评分: X/100
+   - 评价: ...
+
+5. **并行 Agent (Parallel Agents)**
+   - 原文: "parallel coding agents with git worktrees"
+   - 评分: X/100
+   - 评价: ...
+
+**总分**: X/100 (Grade: X)
+
+## 3. Karpathy 式建议
+用 Andrej Karpathy 的口吻给出 3-5 条具体、可执行的建议，风格要技术、直接、有洞察力。
 """
     }
     output_path.write_text(json.dumps(evidence_dict, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1149,6 +1331,45 @@ def build_html_report(
           <li>抽样样本数: {len(session_samples)} 个 session</li>
         </ul>
         <p class="evidence-file">详细证据数据已保存至: <code>*.evidence.json</code></p>
+      </div>
+    </section>
+    """
+
+    # Karpathy Agentic Score 区块
+    karpathy = evidence.karpathy_score
+    karpathy_dimensions_html = ""
+    if karpathy and "dimensions" in karpathy:
+        for dim in karpathy["dimensions"]:
+            width = dim["score"]
+            karpathy_dimensions_html += f"""
+            <div class="score-row">
+              <div class="score-head">
+                <span>{html.escape(dim["name"])}</span>
+                <span>{dim["score"]}/100</span>
+              </div>
+              <div class="score-track"><div class="score-fill" style="width:{width:.2f}%"></div></div>
+              <div class="score-reason" style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">
+                原文: {html.escape(dim["source"])}
+              </div>
+            </div>
+            """
+    
+    karpathy_section = f"""
+    <section class="karpathy-score">
+      <h2>🧠 Karpathy Agentic Engineering Score <span class="grade">{karpathy.get("total_score", 0)} / Grade {karpathy.get("grade", "N/A")}</span></h2>
+      <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">
+        基于 Andrej Karpathy 的 Agentic Coding 理念评估 (From "Vibe Coding" → "Agentic Engineering")
+      </p>
+      {karpathy_dimensions_html}
+      <div class="karpathy-interpretation" style="margin-top: 1.5rem; padding: 1rem; background: var(--surface-2); border-radius: 8px;">
+        <h3 style="font-size: 0.95rem; margin: 0 0 0.75rem; color: var(--accent-2);">📊 维度解读</h3>
+        <ul style="margin: 0; padding-left: 1.2rem; font-size: 0.85rem; color: var(--text-secondary);">
+          <li><strong>编排能力:</strong> {karpathy.get("interpretation", {}).get("orchestration", "N/A")}</li>
+          <li><strong>先探索后编码:</strong> {karpathy.get("interpretation", {}).get("explore_first", "N/A")}</li>
+          <li><strong>质量监督:</strong> {karpathy.get("interpretation", {}).get("oversight", "N/A")}</li>
+          <li><strong>一次达成:</strong> {karpathy.get("interpretation", {}).get("first_pass", "N/A")}</li>
+          <li><strong>并行 Agent:</strong> {karpathy.get("interpretation", {}).get("parallel", "N/A")}</li>
+        </ul>
       </div>
     </section>
     """
@@ -1252,6 +1473,8 @@ def build_html_report(
     </section>
 
     {agentic_section}
+
+    {karpathy_section}
 
     <section class="score">
       <h2>{tr["section_score"]} <span class="grade">{assessment.total_score} / {assessment.grade}</span></h2>

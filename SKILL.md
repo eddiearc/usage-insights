@@ -1,47 +1,57 @@
 ---
 name: usage-insights
-description: 生成兼容 Claude Code 与 Codex CLI 的会话使用分析报告。用于"分析我的使用习惯/usage report/会话洞察/工作流复盘/生成美观报告"等场景；支持自动识别主要语言（中文/英文）并切换报告文案。
+description: 生成兼容 Claude Code 与 Codex CLI 的会话使用分析报告，包含 Karpathy Agentic Engineering 评分。用于"分析我的使用习惯/usage report/会话洞察/工作流复盘/生成美观报告"等场景。
 ---
 
 # Usage Insights
 
 使用本技能生成「跨客户端（Claude Code + Codex CLI）」的统一历史复盘报告，并输出更美观的 HTML。
 
-## 架构变更 (v2.0)
+## 核心特性
 
-**移除了外部 API Key 依赖！** Agentic 分析现在由执行 skill 的 agent 自行完成：
+### 1. Karpathy Agentic Engineering 评分 (新增)
 
-1. **证据收集层**: Python 脚本从 Claude Code / Codex CLI 数据中提取结构化指标
-2. **抽样复盘**: 自动抽取最近 20 个 session 的详细内容进行深度分析
-3. **证据输出**: 生成 `*.evidence.json` 文件，包含统计数据 + 抽样样本
-4. **Agentic 分析**: 由执行此 skill 的 agent 基于证据数据完成深度解读
+基于 **Andrej Karpathy** 的 Agentic Coding 理念，从 5 个维度评估你的 AI 使用水平：
 
-## 抽样复盘 (新增)
+| 维度 | 权重 | 原文出处 |
+|------|------|----------|
+| **编排能力 (Orchestration)** | 20% | "The future of engineering management: orchestrating AI agents, not writing code" |
+| **先探索后编码 (Explore First)** | 20% | "prioritizes web search and exploration before coding" |
+| **质量监督 (Quality Oversight)** | 20% | "Oversight and scrutiny are no longer optional" |
+| **一次达成 (First-Pass)** | 20% | "leverage without sacrificing software quality" |
+| **并行 Agent (Parallel)** | 20% | "parallel coding agents with git worktrees" |
 
-脚本会自动抽取最近 **20 个 session** 的详细内容，包括：
+**评分标准**:
+- A (≥85): 优秀的 Agentic Engineering 实践
+- B (70-84): 良好的 Agentic 意识，有提升空间
+- C (55-69): 基础水平，需要系统性改进
+- D (<55): 主要还是 Vibe Coding，需要转变思维
 
-### Claude Code 样本
+### 2. 抽样复盘
+
+自动抽取最近 **20 个 session** 的详细内容，包括：
 - Session ID 和时间
 - 首条 Prompt（前200字符）
 - 用户消息数
-- 使用的工具序列（前10个）
+- 使用的工具序列
 - 任务结果（outcome）
 - 摩擦类型
 - 项目路径
-
-### Codex CLI 样本
-- Session ID
-- 消息总数
-- 首条 Prompt（前200字符）
 - 意图分类
-- 是否有返工信号
-- 是否有验证信号
+- 返工/验证信号
 
-这些数据让 agent 能够基于具体案例进行分析，而不是只看统计数据。
+### 3. 证据驱动分析
+
+生成 `*.evidence.json` 文件，包含：
+- 统计数据（metrics）
+- 趋势数据（trends）
+- 行为模式（patterns）
+- 抽样复盘数据（session_samples）
+- **Karpathy Agentic Score**（karpathy_agentic_score）
 
 ## 执行步骤
 
-### 基础用法（生成报告 + 证据数据 + 抽样复盘）
+### 基础用法
 
 ```bash
 python3 ./generate_usage_report.py --source auto --output ./artifacts/usage-insights-report.html
@@ -67,11 +77,7 @@ python3 ./generate_usage_report.py --locale en
 ## 输出文件
 
 - **HTML 报告**: 可视化报告，包含所有图表和指标
-- **Evidence JSON**: `*.evidence.json`，包含：
-  - 统计数据（metrics）
-  - 趋势数据（trends）
-  - 行为模式（patterns）
-  - **抽样复盘数据（session_samples）**
+- **Evidence JSON**: `*.evidence.json`，结构化数据供 agent 分析
 
 ### evidence.json 结构
 
@@ -99,15 +105,27 @@ python3 ./generate_usage_report.py --locale en
       "tool_sequence": ["read", "edit", "bash"],
       "outcome": "fully_achieved",
       "friction_types": ["misunderstood_request"]
-    },
-    {
-      "source": "codex",
-      "session_id": "yyy",
-      "first_prompt": "重构这个函数...",
-      "intent": "code_implementation",
-      "has_rework_signal": true
     }
-  ]
+  ],
+  "karpathy_agentic_score": {
+    "total_score": 82,
+    "grade": "B",
+    "dimensions": [
+      {
+        "id": "orchestration",
+        "name": "编排能力 (Orchestration)",
+        "score": 85,
+        "source": "The future of engineering management: orchestrating AI agents..."
+      }
+    ],
+    "interpretation": {
+      "orchestration": "High planning signals indicate good task decomposition",
+      "explore_first": "Good balance of exploration vs implementation",
+      "oversight": "Strong verification habits",
+      "first_pass": "Excellent first-pass completion",
+      "parallel": "Good use of parallel workflows"
+    }
+  }
 }
 ```
 
@@ -117,24 +135,55 @@ python3 ./generate_usage_report.py --locale en
 
 1. 运行 Python 脚本生成报告和证据文件
 2. 读取 `*.evidence.json` 中的结构化数据
-3. **重点分析 `session_samples` 中的具体案例**
-4. 基于统计数据 + 抽样案例生成深度洞察
-5. 将分析结果补充到报告中或直接向用户呈现
+3. 重点分析 `session_samples` 中的具体案例
+4. 基于 **Karpathy Agentic Score** 给出评估
+5. **模拟 Andrej Karpathy 的口吻**给出建议
 
-### 分析要点
+### 模拟 Karpathy 打分模板
 
-基于证据数据，agent 应该关注：
+```markdown
+## 🧠 Karpathy Agentic Engineering Assessment
 
-- **统计数据层面**: 
-  - 高分维度如何进一步放大优势
-  - 低分维度的具体改进步骤
-  - 趋势变化（最近14天 vs 前14天）
+### 维度评分
 
-- **抽样复盘层面**:
-  - 高频摩擦类型的具体表现
-  - 返工信号的常见场景
-  - 工具使用模式是否合理
-  - 会话长度与任务复杂度的关系
+1. **编排能力 (Orchestration)** - 85/100
+   - 原文: "The future of engineering management: orchestrating AI agents, not writing code"
+   - 评价: 你的规划信号很强，说明你善于分解任务。但还可以更系统化，考虑使用更明确的任务模板。
+
+2. **先探索后编码 (Explore Before Code)** - 72/100
+   - 原文: "prioritizes web search and exploration before coding"
+   - 评价:  exploration vs implementation 的比例不错，但在复杂任务前可以更充分地调研现有方案。
+
+[...其他维度...]
+
+### 总分: 82/100 (Grade: B)
+
+### Karpathy 式建议
+
+1. **建立验证清单**: 每个任务开始前明确"完成标准"，避免返工。
+2. **多用并行 Agent**: 对于独立任务，尝试同时启动多个 agent，用 git worktree 管理。
+3. **先搜索再动手**: 复杂任务前先让 agent 调研 3-5 个现有方案。
+4. **定期复盘**: 每周 review 一次高频摩擦类型，固化到 SKILL。
+```
+
+## Karpathy Agentic Engineering 理念
+
+### From "Vibe Coding" → "Agentic Engineering"
+
+| Vibe Coding | Agentic Engineering |
+|------------|---------------------|
+| 即兴、轻松、"氛围组" | 系统化、工程化、可控 |
+| 人类直接写大部分代码 | AI 处理 99% 的编码任务 |
+| 依赖直觉 | 强调编排和监督 |
+| 单线程 | 多 Agent 并行 |
+
+### 核心原则
+
+1. **编排而非编码**: 人类角色从"写代码"转变为"编排 AI Agent"
+2. **先探索，后编码**: 执行编码任务前，先进行 web search 和探索
+3. **质量控制不可少**: "Oversight and scrutiny are no longer optional"
+4. **一次达成**: 第一次就做对，体现清晰的任务理解
+5. **多 Agent 并行**: 同时运行多个 coding agent 处理不同任务
 
 ## 默认数据源
 
@@ -152,6 +201,7 @@ python3 ./generate_usage_report.py \
 ## 报告内容
 
 - 总览指标：会话数、消息数、活跃天数、主要语言
+- **Karpathy Agentic Score**: 5 维度评分 + 解读
 - 数据源覆盖：Claude Code + Codex CLI 分别统计
 - 使用姿势评分：总分 + 5 维度分（每项 20 分）
 - 深度诊断：6 个健康指标卡（健康/关注/风险）
@@ -159,12 +209,4 @@ python3 ./generate_usage_report.py \
 - 关键洞察、优势、短板、后续方向
 - 语言分布、活跃时段、意图分布
 - 高频工具、任务结果、摩擦点、项目路径
-- Agentic 解读区块（由执行 agent 基于证据数据填充）
-
-## "更好的使用方式"判定标准
-
-- 一次达成率更高：同等任务下，最终通过次数更多、返工更少
-- 返工率更低：`still/again/返工` 等信号下降
-- 验证更早：在完成前明确触发 `test/lint/verify/回归`
-- 切换更少：同类任务固定主链路，工具跳转减少
-- 趋势更稳：最近 14 天相对前 14 天，返工下降且验证覆盖提升
+- Agentic 解读区块
