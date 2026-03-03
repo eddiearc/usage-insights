@@ -721,6 +721,68 @@ def normalize_friction_key(key: str, locale: str) -> str:
     return key_norm.title()
 
 
+def normalize_intent_counter(intent_counts: Counter) -> Counter:
+    """标准化意图分类"""
+    normalized: Counter = Counter()
+    for key, value in intent_counts.items():
+        canonical = str(key).strip().lower()
+        if not canonical:
+            continue
+        mapping = {
+            "content_creation": "content_creation",
+            "content_refinement": "content_creation",
+            "build_release": "release_build",
+            "release_build": "release_build",
+            "bug_fix": "debugging",
+            "code_generation": "code_implementation",
+            "implementation": "code_implementation",
+            "git_operations": "tooling_config",
+            "information_seeking": "quick_question",
+            "research": "quick_question",
+        }
+        normalized[mapping.get(canonical, canonical)] += value
+    return normalized
+
+
+def build_insights(locale: str, data: AggregatedData, dominant_lang: str) -> list[str]:
+    """构建关键洞察列表"""
+    tr = I18N[locale]
+    insights = []
+    
+    # 语言分布
+    zh_pct, en_pct = language_mix_percent(data)
+    if zh_pct + en_pct > 0:
+        mix_line = tr["lang_mix"].format(zh_pct=zh_pct, en_pct=en_pct)
+        if locale == "zh":
+            insights.append(f"语言分布：{mix_line}，当前以{'中文' if dominant_lang == 'zh' else '英文'}为主。")
+        else:
+            insights.append(f"Language mix: {mix_line}. Dominant language is {'Chinese' if dominant_lang == 'zh' else 'English'}.")
+    
+    # 数据概览
+    total_msgs = max(1, data.total_user_messages)
+    verification_rate = safe_div(data.verification_signals, total_msgs)
+    planning_rate = safe_div(data.planning_signals, total_msgs)
+    followup_rate = safe_div(data.followup_signals, total_msgs)
+    
+    if locale == "zh":
+        insights.append(f"验证覆盖 {pct(verification_rate)}，规划覆盖 {pct(planning_rate)}，返工信号率 {pct(followup_rate)}。")
+        insights.append(f"共分析了 {data.total_sessions} 个会话，{data.total_active_days} 天活跃使用。")
+    else:
+        insights.append(f"Verification coverage {pct(verification_rate)}, planning coverage {pct(planning_rate)}, rework signal rate {pct(followup_rate)}.")
+        insights.append(f"Analyzed {data.total_sessions} sessions across {data.total_active_days} active days.")
+    
+    # 摩擦分析
+    if data.friction_counts:
+        top_name, top_value = data.friction_counts.most_common(1)[0]
+        label = normalize_friction_key(top_name, locale)
+        if locale == "zh":
+            insights.append(f"最高频摩擦：{label}（{fmt_num(top_value)} 次），建议关注并制定防错规则。")
+        else:
+            insights.append(f"Top friction: {label} ({fmt_num(top_value)} times). Consider adding guardrails.")
+    
+    return insights[:5]
+
+
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
@@ -827,62 +889,104 @@ def calc_grade(total_score: int, locale: str) -> str:
     return tr["grade_d"]
 
 
-def calculate_karpathy_agentic_score(data: AggregatedData, locale: str) -> dict[str, Any]:
+def calculate_karpathy_agentic_score(data: AggregatedData, session_samples: list, locale: str) -> dict[str, Any]:
     """
-    基于 Karpathy 的 Agentic Engineering 理念计算评分
+    生成 Karpathy Agentic Engineering 分析所需的数据
+    注意：不再使用关键词评分，而是返回结构化证据供 AI 专家分析
     原文出处：Karpathy 关于 Agentic Coding 的推文和演讲
     """
     total_messages = max(1, data.total_user_messages)
     total_sessions = max(1, data.total_sessions)
-    
-    # 1. 编排能力 (Orchestration) - 基于规划信号和任务分解
-    planning_rate = safe_div(data.planning_signals, total_messages)
-    orchestration_score = min(100, int(planning_rate * 200))  # 20% planning = 40分，目标50%
-    
-    # 2. 先探索后编码 (Explore First) - 基于搜索/调研信号
-    # 通过 intent 分布间接判断：quick_question + debugging 占比高可能说明探索不足
-    explore_intents = data.intent_counts.get("quick_question", 0) + data.intent_counts.get("debugging", 0)
-    implementation_intents = data.intent_counts.get("code_implementation", 0) + data.intent_counts.get("release_build", 0)
-    explore_ratio = safe_div(explore_intents, explore_intents + implementation_intents)
-    # 探索 : 实现 的理想比例约为 1:3
-    explore_score = min(100, int((1 - explore_ratio) * 150)) if explore_ratio < 0.5 else max(0, int(100 - (explore_ratio - 0.3) * 200))
-    
-    # 3. 质量监督 (Oversight) - 基于验证信号
-    verification_rate = safe_div(data.verification_signals, total_messages)
-    oversight_score = min(100, int(verification_rate * 400))  # 25% verification = 100分
-    
-    # 4. 一次达成 (First-Pass) - 基于返工信号
-    followup_rate = safe_div(data.followup_signals, total_messages)
-    first_pass_score = max(0, int(100 - followup_rate * 200))  # 返工率越低越好
-    
-    # 5. 并行 Agent (Parallel) - 基于工具多样性和项目分布
     avg_tool_diversity = avg(data.session_tool_diversities)
     project_count = len(data.project_counts)
-    parallel_score = min(100, int(avg_tool_diversity * 15) + min(40, project_count * 5))
     
-    # 总分
-    total_score = int((orchestration_score + explore_score + oversight_score + first_pass_score + parallel_score) / 5)
+    # 计算基础统计（仅用于参考，不作为最终评分）
+    planning_rate = safe_div(data.planning_signals, total_messages)
+    verification_rate = safe_div(data.verification_signals, total_messages)
+    followup_rate = safe_div(data.followup_signals, total_messages)
     
+    # 5 个维度的评估框架（供 AI 专家分析使用）
     criteria = KARPATHY_AGENTIC_CRITERIA[locale]
     
+    analysis_framework = {
+        "orchestration": {
+            "id": "orchestration",
+            "name": criteria[0]["name"],
+            "description": criteria[0]["description"],
+            "source": criteria[0]["source"],
+            "indicators": criteria[0]["indicators"],
+            "raw_data": {
+                "planning_signals_count": data.planning_signals,
+                "planning_rate": round(planning_rate, 3),
+                "avg_messages_per_session": round(total_messages / total_sessions, 1),
+                "note": "AI专家应基于session_samples中的prompt分析用户是否善于任务分解和编排"
+            }
+        },
+        "explore_first": {
+            "id": "explore_first", 
+            "name": criteria[1]["name"],
+            "description": criteria[1]["description"],
+            "source": criteria[1]["source"],
+            "indicators": criteria[1]["indicators"],
+            "raw_data": {
+                "intent_distribution": dict(data.intent_counts.most_common(10)),
+                "note": "AI专家应分析session_samples中的first_prompt，判断是否先探索后编码"
+            }
+        },
+        "oversight": {
+            "id": "oversight",
+            "name": criteria[2]["name"],
+            "description": criteria[2]["description"],
+            "source": criteria[2]["source"],
+            "indicators": criteria[2]["indicators"],
+            "raw_data": {
+                "verification_signals_count": data.verification_signals,
+                "verification_rate": round(verification_rate, 3),
+                "tool_diversity_avg": round(avg_tool_diversity, 2),
+                "note": "AI专家应基于session_samples分析用户是否有主动验证和质量监督意识"
+            }
+        },
+        "first_pass": {
+            "id": "first_pass",
+            "name": criteria[3]["name"],
+            "description": criteria[3]["description"],
+            "source": criteria[3]["source"],
+            "indicators": criteria[3]["indicators"],
+            "raw_data": {
+                "followup_signals_count": data.followup_signals,
+                "followup_rate": round(followup_rate, 3),
+                "outcome_distribution": dict(data.outcome_counts),
+                "friction_types": dict(data.friction_counts.most_common(5)),
+                "note": "AI专家应基于outcome和friction数据，以及session_samples分析一次达成率"
+            }
+        },
+        "parallel": {
+            "id": "parallel",
+            "name": criteria[4]["name"],
+            "description": criteria[4]["description"],
+            "source": criteria[4]["source"],
+            "indicators": criteria[4]["indicators"],
+            "raw_data": {
+                "avg_tool_diversity_per_session": round(avg_tool_diversity, 2),
+                "unique_projects": project_count,
+                "project_paths": list(data.project_counts.keys())[:10],
+                "note": "AI专家应基于project_paths和工具使用分析并行Agent使用情况"
+            }
+        }
+    }
+    
     return {
-        "total_score": total_score,
-        "grade": "A" if total_score >= 85 else "B" if total_score >= 70 else "C" if total_score >= 55 else "D",
-        "dimensions": [
-            {"id": "orchestration", "name": criteria[0]["name"], "score": orchestration_score, 
-             "weight": 20, "source": criteria[0]["source"]},
-            {"id": "explore_first", "name": criteria[1]["name"], "score": explore_score,
-             "weight": 20, "source": criteria[1]["source"]},
-            {"id": "oversight", "name": criteria[2]["name"], "score": oversight_score,
-             "weight": 20, "source": criteria[2]["source"]},
-            {"id": "first_pass", "name": criteria[3]["name"], "score": first_pass_score,
-             "weight": 20, "source": criteria[3]["source"]},
-            {"id": "parallel", "name": criteria[4]["name"], "score": parallel_score,
-             "weight": 20, "source": criteria[4]["source"]},
-        ],
+        "analysis_mode": "ai_expert",  # 标记为 AI 专家分析模式
+        "note": "以下数据供AI专家（扮演Andrej Karpathy）进行分析，不再使用关键词评分",
+        "session_samples_for_analysis": session_samples[:20] if session_samples else [],
+        "dimensions": analysis_framework,
         "raw_metrics": {
+            "total_sessions": total_sessions,
+            "total_messages": total_messages,
+            "active_days": data.total_active_days,
             "planning_rate": planning_rate,
             "verification_rate": verification_rate,
+            "followup_rate": followup_rate,
             "followup_rate": followup_rate,
             "avg_tool_diversity": avg_tool_diversity,
             "project_count": project_count,
@@ -943,7 +1047,7 @@ def build_assessment(locale: str, data: AggregatedData) -> tuple[UsageAssessment
 
     if locale == "zh":
         completion_reason = f"结果分布 {fully}/{mostly}/{partial}/{not_achieved}，结合返工信号推算一次达成率 {pct(first_pass_rate)}。"
-        rework_reason = f"返工率 {pct(rework_rate)}（随"仍然/再次"等返工表达、长会话占比变化）。"
+        rework_reason = f'返工率 {pct(rework_rate)}（随"仍然/再次"等返工表达、长会话占比变化）。'
         switch_reason = f"工具切换成本指数 {pct(switch_cost_index)}，会话平均工具种类 {avg_tool_diversity:.1f}。"
         verification_reason = f"验证覆盖 {pct(verification_rate)}、规划覆盖 {pct(planning_rate)}、验收覆盖 {pct(acceptance_rate)}。"
         consistency_reason = "基于最近 14 天 vs 前 14 天的返工与验证变化计算执行趋势。"
@@ -1014,7 +1118,7 @@ def build_assessment(locale: str, data: AggregatedData) -> tuple[UsageAssessment
             "planning_signals": data.planning_signals, "followup_signals": data.followup_signals,
             "outcomes": dict(data.outcome_counts), "friction": dict(data.friction_counts),
         },
-        karpathy_score=calculate_karpathy_agentic_score(data, locale)
+        karpathy_score=calculate_karpathy_agentic_score(data, session_samples, locale)
     )
 
     strengths, weaknesses, next_steps = [], [], []
@@ -1035,24 +1139,24 @@ def build_assessment(locale: str, data: AggregatedData) -> tuple[UsageAssessment
     if completion_score < 12:
         weaknesses.append("一次达成率偏低，任务常在中后段返工。" if locale == "zh" else "First-pass completion is low, with rework pushed into later stages.")
     if rework_score < 12:
-        weaknesses.append("返工控制较弱，建议把"仍然/再次"类反馈前置为验收清单。" if locale == "zh" else "Rework control is weak; convert recurring follow-ups into upfront acceptance checks.")
+        weaknesses.append('返工控制较弱，建议把"仍然/再次"类反馈前置为验收清单。' if locale == "zh" else "Rework control is weak; convert recurring follow-ups into upfront acceptance checks.")
     if switch_score < 12:
         weaknesses.append("工具切换成本偏高，单任务链路可能过于分散。" if locale == "zh" else "Switch cost is high, suggesting fragmented tool chains per task.")
     if verification_score < 12:
-        weaknesses.append("验证覆盖偏低，缺少系统化"先验证再完成"的动作。" if locale == "zh" else "Verification coverage is low; add explicit validate-before-done steps.")
+        weaknesses.append('验证覆盖偏低，缺少系统化"先验证再完成"的动作。' if locale == "zh" else "Verification coverage is low; add explicit validate-before-done steps.")
 
     if friction_total > 0:
         top_name, _ = data.friction_counts.most_common(1)[0]
         label = normalize_friction_key(top_name, locale)
         next_steps.append(f"先攻克头号摩擦「{label}」：整理 3 条防错规则写入 SKILL/系统提示词。" if locale == "zh" else f"Attack top friction '{label}' first: add 3 guardrail rules into your skill/system prompt.")
     if completion_score < 15:
-        next_steps.append("把需求固定为"输入-约束-验收标准"三段模板，先做一次确认再执行。" if locale == "zh" else "Adopt a strict template: input, constraints, acceptance criteria.")
+        next_steps.append('把需求固定为"输入-约束-验收标准"三段模板，先做一次确认再执行。' if locale == "zh" else "Adopt a strict template: input, constraints, acceptance criteria.")
     if verification_score < 15:
         next_steps.append("给每类任务补 1 条默认验证动作（如 lint/test/回归），并写入技能脚本。" if locale == "zh" else "Attach one default verification step (lint/test/regression) to each task type.")
     if switch_score < 15:
         next_steps.append("把同类任务收敛到 1 条主链路（固定工具顺序），减少跨工具来回切换。" if locale == "zh" else "Converge each task type to one primary tool chain to reduce switching.")
     if consistency_score < 14:
-        next_steps.append("固定每周复盘，跟踪"返工率、验证覆盖、长会话占比"三项是否持续改善。" if locale == "zh" else "Run a weekly review tracking rework, verification coverage, and long-session ratio.")
+        next_steps.append('固定每周复盘，跟踪"返工率、验证覆盖、长会话占比"三项是否持续改善。' if locale == "zh" else "Run a weekly review tracking rework, verification coverage, and long-session ratio.")
 
     if not strengths:
         strengths.append("已有可用的 AI 工作节奏，适合继续标准化与自动化。" if locale == "zh" else "You already have a workable AI routine to standardize further.")
