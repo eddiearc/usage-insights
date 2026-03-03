@@ -906,18 +906,27 @@ def calc_grade(total_score: int, locale: str) -> str:
     return tr["grade_d"]
 
 
-def analyze_session_for_examples(session_samples: list[dict], locale: str) -> dict[str, list[dict]]:
+def analyze_session_for_examples(session_samples: list[dict], locale: str) -> dict[str, dict]:
     """
     分析 session samples，提取每个维度的正反案例
-    返回格式：{"orchestration": [{"session_id": ..., "date": ..., "prompt": ..., "type": "good|bad"}, ...], ...}
+    返回格式：{
+        "orchestration": {
+            "good_examples": [{"session_id": ..., "date": ..., "snippet": ..., "reason": ...}, ...],
+            "bad_examples": [{"session_id": ..., "date": ..., "snippet": ..., "reason": ...}, ...]
+        },
+        ...
+    }
     """
     examples = {
-        "orchestration": [],
-        "explore_first": [],
-        "oversight": [],
-        "first_pass": [],
-        "parallel": [],
+        "orchestration": {"good_examples": [], "bad_examples": []},
+        "explore_first": {"good_examples": [], "bad_examples": []},
+        "oversight": {"good_examples": [], "bad_examples": []},
+        "first_pass": {"good_examples": [], "bad_examples": []},
+        "parallel": {"good_examples": [], "bad_examples": []},
     }
+
+    # 定义搜索工具
+    search_tools = {"browser", "web_search", "tavily_search", "search", "fetch", "curl", "wget"}
 
     for sample in session_samples:
         session_id = sample.get("session_id", "unknown")
@@ -927,6 +936,7 @@ def analyze_session_for_examples(session_samples: list[dict], locale: str) -> di
         friction_types = sample.get("friction_types", [])
         tool_sequence = sample.get("tool_sequence", [])
         intent = sample.get("intent", "")
+        source = sample.get("source", "unknown")
 
         # Parse date from start_time
         date_str = ""
@@ -942,92 +952,161 @@ def analyze_session_for_examples(session_samples: list[dict], locale: str) -> di
         if not first_prompt:
             continue
 
-        # --- Orchestration: 任务分解和规划 ---
-        has_planning = has_any_pattern(first_prompt, PLANNING_PATTERNS)
-        has_steps = any(kw in first_prompt.lower() for kw in ["步骤", "step", "分解", "拆分", "阶段", "phase", "里程碑", "milestone"])
+        first_prompt_lower = first_prompt.lower()
+
+        # --- Orchestration: 编排能力 (任务分解和规划) ---
+        # 关键词：步骤、计划、拆解、分解、里程碑、待办、清单、验收标准
+        orchestration_keywords = ["步骤", "计划", "拆解", "分解", "拆分", "阶段", "里程碑", "待办", "清单", "验收标准",
+                                   "step", "plan", "milestone", "todo", "checklist", "acceptance criteria"]
+        has_orchestration = has_any_pattern(first_prompt, PLANNING_PATTERNS) or \
+                           any(kw in first_prompt_lower for kw in orchestration_keywords)
         has_acceptance = has_any_pattern(first_prompt, ACCEPTANCE_PATTERNS)
 
-        if has_planning or has_steps:
-            examples["orchestration"].append({
+        if has_orchestration:
+            # 提取关键片段
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "包含明确的任务分解或规划信号" if locale == "zh" else "Clear task decomposition or planning signals"
+            examples["orchestration"]["good_examples"].append({
                 "session_id": session_id,
                 "date": date_str,
-                "prompt_snippet": first_prompt[:150] + "..." if len(first_prompt) > 150 else first_prompt,
-                "type": "good",
-                "reason": "明确的任务分解或规划信号" if locale == "zh" else "Clear task decomposition or planning",
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
             })
-        elif len(first_prompt) > 100 and not has_acceptance and outcome in ["partially_achieved", "not_achieved"]:
-            # 长提示但没有规划，且结果不好
-            examples["orchestration"].append({
+        elif len(first_prompt) > 150 and not has_acceptance and outcome in ["partially_achieved", "not_achieved"]:
+            # 长提示但没有规划，且结果不好 → 反面案例
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "长任务缺乏明确分解步骤，导致结果未达成" if locale == "zh" else "Long task without clear decomposition led to incomplete outcome"
+            examples["orchestration"]["bad_examples"].append({
                 "session_id": session_id,
                 "date": date_str,
-                "prompt_snippet": first_prompt[:150] + "..." if len(first_prompt) > 150 else first_prompt,
-                "type": "bad",
-                "reason": "长任务缺乏明确分解，结果未达成" if locale == "zh" else "Long task without clear decomposition, outcome not achieved",
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
             })
 
         # --- Explore First: 先探索后编码 ---
-        has_research = any(kw in first_prompt.lower() for kw in ["搜索", "search", "调研", "research", "了解", "understand", "看看", "check", "怎么", "how to"])
-        is_quick_impl = intent in ["code_implementation", "release_build"] and not has_research
+        # 关键词：搜索、调研、了解、看看、check、怎么、how to、了解
+        explore_keywords = ["搜索", "调研", "了解", "看看", "查查", "搜索一下", "查一下",
+                           "search", "research", "investigate", "explore", "look into", "check"]
+        has_explore = any(kw in first_prompt_lower for kw in explore_keywords)
+        # 检查是否使用了搜索工具
+        used_search_tools = any(t.lower() in search_tools or any(st in t.lower() for st in search_tools) for t in tool_sequence)
 
-        if intent in ["quick_question", "debugging"] or has_research:
-            examples["explore_first"].append({
+        if has_explore or used_search_tools:
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "编码前主动搜索调研" if locale == "zh" else "Active research before implementation"
+            if used_search_tools:
+                search_tools_used = [t for t in tool_sequence if any(st in t.lower() for st in search_tools)]
+                reason += f" (使用了搜索工具: {', '.join(search_tools_used)[:50]})"
+            examples["explore_first"]["good_examples"].append({
                 "session_id": session_id,
                 "date": date_str,
-                "prompt_snippet": first_prompt[:150] + "..." if len(first_prompt) > 150 else first_prompt,
-                "type": "good",
-                "reason": "编码前进行探索或调研" if locale == "zh" else "Exploration before implementation",
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
             })
-        elif is_quick_impl and len(first_prompt) < 80:
-            # 直接要求实现，没有前期探索
-            examples["explore_first"].append({
+        elif intent in ["code_implementation", "release_build"] and len(first_prompt) < 100 and not has_explore:
+            # 直接要求实现，没有前期探索 → 反面案例
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "直接要求实现，缺少前期探索调研" if locale == "zh" else "Direct implementation without prior exploration"
+            examples["explore_first"]["bad_examples"].append({
                 "session_id": session_id,
                 "date": date_str,
-                "prompt_snippet": first_prompt[:150] + "..." if len(first_prompt) > 150 else first_prompt,
-                "type": "bad",
-                "reason": "直接要求实现，缺乏前期探索" if locale == "zh" else "Direct implementation request without exploration",
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
             })
 
         # --- Oversight: 质量监督 ---
-        has_verification = has_any_pattern(first_prompt, VERIFICATION_PATTERNS)
-        if has_verification:
-            examples["oversight"].append({
+        # 关键词：测试、验证、验收、回归、复测、单测
+        oversight_keywords = ["测试", "验证", "验收", "回归", "复测", "单测", "集成测试", "lint", "检查",
+                             "test", "verify", "validate", "check", "review", "assert"]
+        has_oversight = has_any_pattern(first_prompt, VERIFICATION_PATTERNS) or \
+                       any(kw in first_prompt_lower for kw in oversight_keywords)
+
+        if has_oversight:
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "主动要求验证或测试" if locale == "zh" else "Explicitly requested verification or testing"
+            examples["oversight"]["good_examples"].append({
                 "session_id": session_id,
                 "date": date_str,
-                "prompt_snippet": first_prompt[:150] + "..." if len(first_prompt) > 150 else first_prompt,
-                "type": "good",
-                "reason": "主动要求验证或测试" if locale == "zh" else "Explicit verification request",
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
+            })
+
+        # Oversight 反面案例：复杂任务但没有验证要求
+        if not has_oversight and len(first_prompt) > 150 and intent in ["code_implementation", "release_build"]:
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "复杂实现任务缺少验证要求" if locale == "zh" else "Complex implementation without verification requirements"
+            examples["oversight"]["bad_examples"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
             })
 
         # --- First Pass: 一次达成 ---
-        has_rework = sample.get("has_rework_signal", False) if sample.get("source") == "codex" else any(f in str(friction_types).lower() for f in ["rework", "edit", "修改", "返工"])
+        # 检测是否有返工信号
+        has_rework = False
+        if source == "codex":
+            has_rework = sample.get("has_rework_signal", False)
+        else:
+            has_rework = any(f in str(friction_types).lower() for f in ["rework", "edit", "修改", "返工", "minor edit"])
 
         if outcome == "fully_achieved" and not has_rework and not friction_types:
-            examples["first_pass"].append({
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "一次达成，无返工" if locale == "zh" else "First-pass completion with no rework"
+            examples["first_pass"]["good_examples"].append({
                 "session_id": session_id,
                 "date": date_str,
-                "prompt_snippet": first_prompt[:150] + "..." if len(first_prompt) > 150 else first_prompt,
-                "type": "good",
-                "reason": "一次达成，无返工信号" if locale == "zh" else "First-pass completion, no rework signals",
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
             })
-        elif has_rework or outcome in ["not_achieved", "partially_achieved"]:
-            friction_info = ", ".join(friction_types[:2]) if friction_types else "返工信号"
-            examples["first_pass"].append({
+        elif outcome in ["not_achieved", "partially_achieved"] or has_rework:
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            friction_str = ", ".join(friction_types[:2]) if friction_types else "返工信号"
+            reason = f"结果未达成或出现返工: {friction_str}" if locale == "zh" else f"Incomplete outcome or rework: {friction_str}"
+            examples["first_pass"]["bad_examples"].append({
                 "session_id": session_id,
                 "date": date_str,
-                "prompt_snippet": first_prompt[:150] + "..." if len(first_prompt) > 150 else first_prompt,
-                "type": "bad",
-                "reason": f"返工或结果未达成: {friction_info}" if locale == "zh" else f"Rework or incomplete: {friction_info}",
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
             })
 
         # --- Parallel: 并行 Agent ---
         unique_tools = len(set(tool_sequence))
+        # 检查是否涉及多个项目（仅针对 claude 数据）
+        project_path = sample.get("project_path", "")
+
         if unique_tools >= 3:
-            examples["parallel"].append({
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = f"单会话使用 {unique_tools} 种工具" if locale == "zh" else f"Used {unique_tools} different tools in one session"
+            examples["parallel"]["good_examples"].append({
                 "session_id": session_id,
                 "date": date_str,
-                "prompt_snippet": f"工具序列: {', '.join(tool_sequence[:5])}",
-                "type": "good",
-                "reason": f"单会话使用 {unique_tools} 种工具，可能并行处理多个任务" if locale == "zh" else f"Used {unique_tools} tools in single session",
+                "snippet": snippet,
+                "reason": reason,
+                "tool_count": unique_tools,
+                "tools": tool_sequence[:5],
+                "source": source,
+            })
+
+        # Parallel 反面案例：工具使用单一但任务复杂
+        if unique_tools <= 1 and len(first_prompt) > 150 and intent in ["code_implementation", "release_build"]:
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "复杂任务但工具使用单一，可能错过更优方案" if locale == "zh" else "Complex task with limited tool usage, possibly missed better approaches"
+            examples["parallel"]["bad_examples"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "snippet": snippet,
+                "reason": reason,
+                "tools": tool_sequence,
+                "source": source,
             })
 
     return examples
@@ -1105,44 +1184,62 @@ def calculate_karpathy_agentic_score(data: AggregatedData, session_samples: list
             else:
                 evaluation = "Insufficient samples for case-based evaluation."
 
+        # Build evidence structure with singular good_example and bad_example
+        evidence = {}
+        if examples_good:
+            best_good = examples_good[0]  # Take the best (first) example
+            evidence["good_example"] = {
+                "date": best_good.get("date", ""),
+                "session_id": best_good.get("session_id", ""),
+                "snippet": best_good.get("snippet", "")[:150] + "..." if len(best_good.get("snippet", "")) > 150 else best_good.get("snippet", ""),
+            }
+        if examples_bad:
+            worst_bad = examples_bad[0]  # Take the worst (first) bad example
+            evidence["bad_example"] = {
+                "date": worst_bad.get("date", ""),
+                "session_id": worst_bad.get("session_id", ""),
+                "snippet": worst_bad.get("snippet", "")[:150] + "..." if len(worst_bad.get("snippet", "")) > 150 else worst_bad.get("snippet", ""),
+            }
+
         return {
             "score": score,
             "grade": grade,
             "metric_value": round(metric_value, 3),
             "evaluation": evaluation,
-            "examples_good": examples_good,
-            "examples_bad": examples_bad,
+            "examples_good": examples_good[:2],  # Keep arrays for backward compatibility
+            "examples_bad": examples_bad[:2],
+            "evidence": evidence,  # New structure for HTML display
         }
 
     # 为每个维度生成详细评估
     orchestration_eval = generate_dimension_evaluation(
         "orchestration", planning_rate, 0.25, 0.1,
-        concrete_examples["orchestration"],
-        [e for e in concrete_examples["orchestration"] if e["type"] == "bad"]
+        concrete_examples["orchestration"]["good_examples"],
+        concrete_examples["orchestration"]["bad_examples"]
     )
 
     explore_eval = generate_dimension_evaluation(
         "explore_first", explore_ratio, 0.3, 0.15,
-        concrete_examples["explore_first"],
-        [e for e in concrete_examples["explore_first"] if e["type"] == "bad"]
+        concrete_examples["explore_first"]["good_examples"],
+        concrete_examples["explore_first"]["bad_examples"]
     )
 
     oversight_eval = generate_dimension_evaluation(
         "oversight", verification_rate, 0.25, 0.1,
-        concrete_examples["oversight"],
-        []  # Oversight 只有正面案例（主动要求验证）
+        concrete_examples["oversight"]["good_examples"],
+        concrete_examples["oversight"]["bad_examples"]
     )
 
     first_pass_eval = generate_dimension_evaluation(
         "first_pass", 1 - followup_rate, 0.75, 0.5,  # 返工率越低越好
-        concrete_examples["first_pass"],
-        [e for e in concrete_examples["first_pass"] if e["type"] == "bad"]
+        concrete_examples["first_pass"]["good_examples"],
+        concrete_examples["first_pass"]["bad_examples"]
     )
 
     parallel_eval = generate_dimension_evaluation(
         "parallel", min(1.0, avg_tool_diversity / 5), 0.6, 0.3,
-        concrete_examples["parallel"],
-        []
+        concrete_examples["parallel"]["good_examples"],
+        concrete_examples["parallel"]["bad_examples"]
     )
 
     analysis_framework = {
@@ -1279,11 +1376,11 @@ def calculate_karpathy_agentic_score(data: AggregatedData, session_samples: list
         "overall_grade": overall_grade,
         "concrete_examples_summary": {
             "total_samples_analyzed": len(session_samples),
-            "orchestration_examples": len(concrete_examples["orchestration"]),
-            "explore_first_examples": len(concrete_examples["explore_first"]),
-            "oversight_examples": len(concrete_examples["oversight"]),
-            "first_pass_examples": len(concrete_examples["first_pass"]),
-            "parallel_examples": len(concrete_examples["parallel"]),
+            "orchestration_examples": len(concrete_examples["orchestration"]["good_examples"]) + len(concrete_examples["orchestration"]["bad_examples"]),
+            "explore_first_examples": len(concrete_examples["explore_first"]["good_examples"]) + len(concrete_examples["explore_first"]["bad_examples"]),
+            "oversight_examples": len(concrete_examples["oversight"]["good_examples"]) + len(concrete_examples["oversight"]["bad_examples"]),
+            "first_pass_examples": len(concrete_examples["first_pass"]["good_examples"]) + len(concrete_examples["first_pass"]["bad_examples"]),
+            "parallel_examples": len(concrete_examples["parallel"]["good_examples"]) + len(concrete_examples["parallel"]["bad_examples"]),
         },
         "dimensions": analysis_framework,
         "concrete_recommendations": concrete_recommendations[:5],  # 最多5条具体建议
@@ -1523,9 +1620,17 @@ def build_diagnostic_cards(metrics: list[DiagnosticMetric], empty_text: str) -> 
 def sample_recent_sessions(
     claude_dir: Path,
     codex_history: Path,
-    limit: int = 20
+    limit: int = 20,
+    pool_size: int = 100
 ) -> list[dict[str, Any]]:
-    """抽样最近 N 个 session 的详细内容用于复盘分析"""
+    """
+    抽样最近 N 个 session 的详细内容用于复盘分析
+
+    策略：
+    1. 先从最近 100 个 session 中收集候选
+    2. 按消息数量排序，取最长的 top `limit` 个
+    这样可以确保分析的都是有实质内容的复杂对话
+    """
     samples: list[dict[str, Any]] = []
 
     # 从 Claude Code 收集 sessions
@@ -1534,7 +1639,7 @@ def sample_recent_sessions(
 
     if session_dir.exists():
         session_files = sorted(session_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-        for path in session_files[:limit]:
+        for path in session_files[:pool_size]:
             payload = load_json(path)
             if not payload:
                 continue
@@ -1618,8 +1723,15 @@ def sample_recent_sessions(
                 "has_verification_signal": has_verification,
             })
 
-    # 按时间排序，取最近的 N 个
-    samples.sort(key=lambda x: x.get("start_time", ""), reverse=True)
+    # 按消息数量排序，取最长的 N 个（优先分析复杂对话）
+    def get_message_count(s):
+        # 优先使用明确的 message_count 字段
+        if "message_count" in s:
+            return s["message_count"]
+        # 其次是 user_message_count
+        return s.get("user_message_count", 0)
+    
+    samples.sort(key=get_message_count, reverse=True)
     return samples[:limit]
 
 
@@ -1645,14 +1757,14 @@ def generate_evidence_json(evidence: EvidenceData, output_path: Path) -> None:
                 for ex in good_examples[:2]:
                     date_info = f"{ex['date']} / " if ex.get('date') else ""
                     case_summary += f"- {date_info}{ex['session_id']}: {ex['reason']}\n"
-                    case_summary += f"  内容片段: \"{ex['prompt_snippet'][:100]}...\"\n"
+                    case_summary += f"  内容片段: \"{ex['snippet'][:100]}...\"\n"
 
             if bad_examples:
                 case_summary += "\n需要改进的案例:\n"
                 for ex in bad_examples[:2]:
                     date_info = f"{date_info} / " if ex.get('date') else ""
                     case_summary += f"- {date_info}{ex['session_id']}: {ex['reason']}\n"
-                    case_summary += f"  内容片段: \"{ex['prompt_snippet'][:100]}...\"\n"
+                    case_summary += f"  内容片段: \"{ex['snippet'][:100]}...\"\n"
 
         if karpathy.get("concrete_recommendations"):
             case_summary += "\n\n基于案例的具体建议:\n"
@@ -1771,37 +1883,36 @@ def build_html_report(
             grade = eval_data.get("grade", "N/A")
             score = eval_data.get("score", 0)
             evaluation_text = eval_data.get("evaluation", "")
-            good_examples = eval_data.get("examples_good", [])
-            bad_examples = eval_data.get("examples_bad", [])
+            evidence_data = eval_data.get("evidence", {})
+            good_example = evidence_data.get("good_example")
+            bad_example = evidence_data.get("bad_example")
 
             grade_color = {"A": "#22c55e", "B": "#06b6d4", "C": "#f59e0b", "D": "#ef4444"}.get(grade, "#888")
 
-            # 构建案例展示HTML
+            # 构建案例展示HTML - 使用新的 evidence 结构
             examples_html = ""
-            if good_examples or bad_examples:
+            if good_example or bad_example:
                 examples_html += '<div style="margin-top: 0.75rem; padding: 0.75rem; background: var(--bg); border-radius: 6px; font-size: 0.8rem;">'
 
                 # 正面案例
-                if good_examples:
+                if good_example:
                     examples_html += '<div style="margin-bottom: 0.5rem;"><strong style="color: #22c55e;">✓ 做得好的案例:</strong></div>'
-                    for ex in good_examples[:1]:  # 只显示一个案例避免过长
-                        date_info = f"{ex['date']} / " if ex.get('date') else ""
-                        examples_html += f'<div style="margin-left: 0.5rem; margin-bottom: 0.5rem; color: var(--text-secondary);">'
-                        examples_html += f'<div style="font-size: 0.75rem; margin-bottom: 0.2rem;">{date_info}{ex["session_id"][:25]}...</div>'
-                        examples_html += f'<div style="font-style: italic; color: var(--text);">"{html.escape(ex["prompt_snippet"][:80])}..."</div>'
-                        examples_html += f'<div style="color: #22c55e; margin-top: 0.2rem;">{html.escape(ex["reason"])}</div>'
-                        examples_html += '</div>'
+                    date_info = f"{good_example.get('date', '')} / " if good_example.get('date') else ""
+                    examples_html += f'<div style="margin-left: 0.5rem; margin-bottom: 0.5rem; color: var(--text-secondary);">'
+                    examples_html += f'<div style="font-size: 0.75rem; margin-bottom: 0.2rem;">{date_info}{good_example.get("session_id", "")[:25]}...</div>'
+                    snippet = good_example.get("snippet", "")
+                    examples_html += f'<div style="font-style: italic; color: var(--text);">"{html.escape(snippet[:100])}{"..." if len(snippet) > 100 else ""}"</div>'
+                    examples_html += '</div>'
 
                 # 负面案例
-                if bad_examples:
+                if bad_example:
                     examples_html += '<div style="margin-top: 0.5rem;"><strong style="color: #ef4444;">✗ 需要改进的案例:</strong></div>'
-                    for ex in bad_examples[:1]:  # 只显示一个案例避免过长
-                        date_info = f"{ex['date']} / " if ex.get('date') else ""
-                        examples_html += f'<div style="margin-left: 0.5rem; margin-bottom: 0.5rem; color: var(--text-secondary);">'
-                        examples_html += f'<div style="font-size: 0.75rem; margin-bottom: 0.2rem;">{date_info}{ex["session_id"][:25]}...</div>'
-                        examples_html += f'<div style="font-style: italic; color: var(--text);">"{html.escape(ex["prompt_snippet"][:80])}..."</div>'
-                        examples_html += f'<div style="color: #ef4444; margin-top: 0.2rem;">{html.escape(ex["reason"])}</div>'
-                        examples_html += '</div>'
+                    date_info = f"{bad_example.get('date', '')} / " if bad_example.get('date') else ""
+                    examples_html += f'<div style="margin-left: 0.5rem; margin-bottom: 0.5rem; color: var(--text-secondary);">'
+                    examples_html += f'<div style="font-size: 0.75rem; margin-bottom: 0.2rem;">{date_info}{bad_example.get("session_id", "")[:25]}...</div>'
+                    snippet = bad_example.get("snippet", "")
+                    examples_html += f'<div style="font-style: italic; color: var(--text);">"{html.escape(snippet[:100])}{"..." if len(snippet) > 100 else ""}"</div>'
+                    examples_html += '</div>'
 
                 examples_html += '</div>'
 
@@ -2070,7 +2181,7 @@ def main() -> None:
     locale = pick_locale(args.locale, data.language_chars, data.language_messages)
     
     # 抽样复盘：收集最近 20 个 session 的详细内容
-    session_samples = sample_recent_sessions(args.claude_dir, args.codex_history, limit=20)
+    session_samples = sample_recent_sessions(args.claude_dir, args.codex_history, limit=20, pool_size=100)
     
     assessment, evidence = build_assessment(locale, data, session_samples)
     evidence.session_samples = session_samples

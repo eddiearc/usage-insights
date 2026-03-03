@@ -1,0 +1,204 @@
+def analyze_session_for_examples(session_samples: list[dict], locale: str) -> dict[str, dict]:
+    """
+    分析 session samples，提取每个维度的正反案例
+    返回格式：{
+        "orchestration": {
+            "good_examples": [{"session_id": ..., "date": ..., "snippet": ..., "reason": ...}, ...],
+            "bad_examples": [{"session_id": ..., "date": ..., "snippet": ..., "reason": ...}, ...]
+        },
+        ...
+    }
+    """
+    examples = {
+        "orchestration": {"good_examples": [], "bad_examples": []},
+        "explore_first": {"good_examples": [], "bad_examples": []},
+        "oversight": {"good_examples": [], "bad_examples": []},
+        "first_pass": {"good_examples": [], "bad_examples": []},
+        "parallel": {"good_examples": [], "bad_examples": []},
+    }
+
+    # 定义搜索工具
+    search_tools = {"browser", "web_search", "tavily_search", "search", "fetch", "curl", "wget"}
+
+    for sample in session_samples:
+        session_id = sample.get("session_id", "unknown")
+        start_time = sample.get("start_time", "")
+        first_prompt = sample.get("first_prompt", "")
+        outcome = sample.get("outcome", "unknown")
+        friction_types = sample.get("friction_types", [])
+        tool_sequence = sample.get("tool_sequence", [])
+        intent = sample.get("intent", "")
+        source = sample.get("source", "unknown")
+
+        # Parse date from start_time
+        date_str = ""
+        if start_time:
+            try:
+                dt = parse_iso(start_time) if isinstance(start_time, str) else None
+                if dt:
+                    date_str = dt.strftime("%Y-%m-%d")
+            except:
+                pass
+
+        # Skip empty samples
+        if not first_prompt:
+            continue
+
+        first_prompt_lower = first_prompt.lower()
+
+        # --- Orchestration: 编排能力 (任务分解和规划) ---
+        # 关键词：步骤、计划、拆解、分解、里程碑、待办、清单、验收标准
+        orchestration_keywords = ["步骤", "计划", "拆解", "分解", "拆分", "阶段", "里程碑", "待办", "清单", "验收标准",
+                                   "step", "plan", "milestone", "todo", "checklist", "acceptance criteria"]
+        has_orchestration = has_any_pattern(first_prompt, PLANNING_PATTERNS) or \
+                           any(kw in first_prompt_lower for kw in orchestration_keywords)
+        has_acceptance = has_any_pattern(first_prompt, ACCEPTANCE_PATTERNS)
+
+        if has_orchestration:
+            # 提取关键片段
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "包含明确的任务分解或规划信号" if locale == "zh" else "Clear task decomposition or planning signals"
+            examples["orchestration"]["good_examples"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
+            })
+        elif len(first_prompt) > 150 and not has_acceptance and outcome in ["partially_achieved", "not_achieved"]:
+            # 长提示但没有规划，且结果不好 → 反面案例
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "长任务缺乏明确分解步骤，导致结果未达成" if locale == "zh" else "Long task without clear decomposition led to incomplete outcome"
+            examples["orchestration"]["bad_examples"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
+            })
+
+        # --- Explore First: 先探索后编码 ---
+        # 关键词：搜索、调研、了解、看看、check、怎么、how to、了解
+        explore_keywords = ["搜索", "调研", "了解", "看看", "查查", "搜索一下", "查一下",
+                           "search", "research", "investigate", "explore", "look into", "check"]
+        has_explore = any(kw in first_prompt_lower for kw in explore_keywords)
+        # 检查是否使用了搜索工具
+        used_search_tools = any(t.lower() in search_tools or any(st in t.lower() for st in search_tools) for t in tool_sequence)
+
+        if has_explore or used_search_tools:
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "编码前主动搜索调研" if locale == "zh" else "Active research before implementation"
+            if used_search_tools:
+                search_tools_used = [t for t in tool_sequence if any(st in t.lower() for st in search_tools)]
+                reason += f" (使用了搜索工具: {', '.join(search_tools_used)[:50]})"
+            examples["explore_first"]["good_examples"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
+            })
+        elif intent in ["code_implementation", "release_build"] and len(first_prompt) < 100 and not has_explore:
+            # 直接要求实现，没有前期探索 → 反面案例
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "直接要求实现，缺少前期探索调研" if locale == "zh" else "Direct implementation without prior exploration"
+            examples["explore_first"]["bad_examples"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
+            })
+
+        # --- Oversight: 质量监督 ---
+        # 关键词：测试、验证、验收、回归、复测、单测
+        oversight_keywords = ["测试", "验证", "验收", "回归", "复测", "单测", "集成测试", "lint", "检查",
+                             "test", "verify", "validate", "check", "review", "assert"]
+        has_oversight = has_any_pattern(first_prompt, VERIFICATION_PATTERNS) or \
+                       any(kw in first_prompt_lower for kw in oversight_keywords)
+
+        if has_oversight:
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "主动要求验证或测试" if locale == "zh" else "Explicitly requested verification or testing"
+            examples["oversight"]["good_examples"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
+            })
+
+        # Oversight 反面案例：复杂任务但没有验证要求
+        if not has_oversight and len(first_prompt) > 150 and intent in ["code_implementation", "release_build"]:
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "复杂实现任务缺少验证要求" if locale == "zh" else "Complex implementation without verification requirements"
+            examples["oversight"]["bad_examples"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
+            })
+
+        # --- First Pass: 一次达成 ---
+        # 检测是否有返工信号
+        has_rework = False
+        if source == "codex":
+            has_rework = sample.get("has_rework_signal", False)
+        else:
+            has_rework = any(f in str(friction_types).lower() for f in ["rework", "edit", "修改", "返工", "minor edit"])
+
+        if outcome == "fully_achieved" and not has_rework and not friction_types:
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "一次达成，无返工" if locale == "zh" else "First-pass completion with no rework"
+            examples["first_pass"]["good_examples"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
+            })
+        elif outcome in ["not_achieved", "partially_achieved"] or has_rework:
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            friction_str = ", ".join(friction_types[:2]) if friction_types else "返工信号"
+            reason = f"结果未达成或出现返工: {friction_str}" if locale == "zh" else f"Incomplete outcome or rework: {friction_str}"
+            examples["first_pass"]["bad_examples"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "snippet": snippet,
+                "reason": reason,
+                "source": source,
+            })
+
+        # --- Parallel: 并行 Agent ---
+        unique_tools = len(set(tool_sequence))
+        # 检查是否涉及多个项目（仅针对 claude 数据）
+        project_path = sample.get("project_path", "")
+
+        if unique_tools >= 3:
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = f"单会话使用 {unique_tools} 种工具" if locale == "zh" else f"Used {unique_tools} different tools in one session"
+            examples["parallel"]["good_examples"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "snippet": snippet,
+                "reason": reason,
+                "tool_count": unique_tools,
+                "tools": tool_sequence[:5],
+                "source": source,
+            })
+
+        # Parallel 反面案例：工具使用单一但任务复杂
+        if unique_tools <= 1 and len(first_prompt) > 150 and intent in ["code_implementation", "release_build"]:
+            snippet = first_prompt[:200] + "..." if len(first_prompt) > 200 else first_prompt
+            reason = "复杂任务但工具使用单一，可能错过更优方案" if locale == "zh" else "Complex task with limited tool usage, possibly missed better approaches"
+            examples["parallel"]["bad_examples"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "snippet": snippet,
+                "reason": reason,
+                "tools": tool_sequence,
+                "source": source,
+            })
+
+    return examples
