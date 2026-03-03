@@ -1,59 +1,78 @@
 ---
 name: usage-insights
-description: 生成兼容 Claude Code 与 Codex CLI 的会话使用分析报告，由 AI 专家（Andrej Karpathy 模式）进行 Agentic Engineering 评估。
+description: 生成跨 Claude Code 与 Codex CLI 的会话复盘报告。采用 Andrej Karpathy 视角做纯定性 Agentic Engineering 评审，不使用程序化评分。
 ---
 
 # Usage Insights
 
-使用本技能生成「跨客户端（Claude Code + Codex CLI）」的统一历史复盘报告，并通过 AI 专家分析模式评估你的 AI 使用水平。
+使用本技能生成「跨客户端（Claude Code + Codex CLI）」的统一历史复盘报告，并由执行技能的 agent 扮演 Andrej Karpathy 做专家评审。
+
+本技能强调: `证据驱动 + 主观专业判断`，而不是关键词打分或统计分数。
 
 ## 核心特性
 
-### 1. AI 专家分析模式（Karpathy 模式）
+### 1) Karpathy 专家模式（定性）
 
-**不再使用关键词评分！** 改为由执行技能的 agent 扮演 **Andrej Karpathy**，基于真实的会话样本来进行专业评估。
+- 执行技能时，必须以 **Andrej Karpathy** 的工程审视方式进行分析
+- 输出专业、直接、有洞察的评语
+- 给出 `A/B/C/D` 粗粒度评级（主观判断），不输出 `x/100`
 
-基于 **Andrej Karpathy** 的 Agentic Coding 理念，从 5 个维度评估你的 AI 使用水平。
+### 2) 跨客户端样本抽取
 
-### 2. 会话样本复盘
+- 自动抽取最近 `N` 个 session（默认 20）
+- 同时支持 Claude Code + Codex CLI
+- 保留 `source/session_id/first_prompt` 作为证据锚点
 
-自动抽取最近 **20 个 session** 的详细内容供 AI 专家分析。
+### 3) 证据优先
 
-### 3. 证据驱动分析
-
-生成 `*.evidence.json` 文件，包含结构化数据供 agent 分析。
+- 先收集会话证据，再输出评审结论
+- 每个维度必须引用真实 session 示例
 
 ## 报告结构（按优先级排序）
 
-1. **🧠 AI 专家评估** - 基于 session samples 的专业分析
-2. **✅ 优势** - 你的 Agentic Engineering 强项
-3. **⚠️ 劣势** - 需要改进的地方
-4. **🎯 改进建议** - 具体的下一步行动
-5. **💡 关键洞察** - 数据驱动的深度洞察
-6. **📊 统计指标** - 会话数、消息数等基础数据
+1. **🧠 Karpathy 专家评估**（主观、定性）
+2. **5 维详细评价**（每维都要有证据 + 解释 + 改进动作）
+3. **✅ 优势**
+4. **⚠️ 短板**
+5. **🎯 下一步行动（3-5 条）**
+6. **💡 Karpathy's Take**
 
 ## 执行步骤
 
-### 基础用法
+### Step 1. 抽样会话证据
 
 ```bash
-python3 ./generate_usage_report.py --source auto --output ./artifacts/usage-insights-report.html
+bash ./scripts/collect_session_samples.sh \
+  --source auto \
+  --limit 20 \
+  --output-dir ./artifacts
 ```
 
-### 仅分析单一来源
+### Step 2. 阅读证据并形成判断
+
+- 必读文件: `./artifacts/session-samples.md`
+- 可选补充: `~/.claude/usage-data/session-meta/*.json`、`~/.claude/usage-data/facets/*.json`、`~/.codex/history.jsonl`
+- 若证据不足，可把 `--limit` 提高到 `30` 或 `40`
+
+### Step 3. 生成评审报告
+
+输出文件建议:
+- `./artifacts/usage-insights-review.md`
+- `./artifacts/session-samples.json`（证据原始数据）
+
+### Step 4. 渲染 HTML（可视化）
 
 ```bash
-# 仅 Claude Code
-python3 ./generate_usage_report.py --source claude
-
-# 仅 Codex CLI
-python3 ./generate_usage_report.py --source codex
+python3 ./scripts/render_review_html.py \
+  --input ./artifacts/usage-insights-review.md \
+  --output ./artifacts/usage-insights-review.html
 ```
 
-## 输出文件
-
-- **HTML 报告**: 可视化报告，优先展示 AI 专家评估
-- **Evidence JSON**: `*.evidence.json`，结构化数据供 agent 分析
+渲染规范（内置样式）:
+- 绿色突出优势
+- 红色突出短板
+- 橙/青用于中间态与行动项
+- 重点标签自动加粗（如证据、评语、改进动作）
 
 ---
 
@@ -70,136 +89,50 @@ python3 ./generate_usage_report.py --source codex
 
 ### 5 维度评估框架
 
-基于 `karpathy_score.dimensions` 中的数据，从以下 5 个维度进行评估：
+从以下 5 个维度做**定性**评估:
 
 #### 1. 编排能力 (Orchestration)
 
-**评估标准：**
-- **A级 (85-100)**: 几乎每个任务都有明确的步骤分解、里程碑定义、验收标准
-- **B级 (70-84)**: 大部分任务有良好的规划，偶尔有即兴发挥
-- **C级 (55-69)**: 规划不足，经常直接进入编码，边做边想
-- **D级 (<55)**: 典型的 "Vibe Coding"，没有系统性规划
-
-**判断依据：**
-- 阅读 session samples 中的 first_prompt
-- 看是否有明确的任务分解、步骤规划
-- 是否有验收标准的定义
-- 是否善用子 agent 分工
-
-**示例评语：**
-> "你在 elys-backend 项目中展示了良好的编排能力。比如 session xxx 中，你先定义了接口契约，再让 agent 实现，这是典型的 Agentic Engineering 思维。"
+- 看任务是否先定义目标、步骤、验收标准
+- 看是否有“先设计后执行”的指令风格
 
 #### 2. 先探索后编码 (Explore First)
 
-**评估标准：**
-- **A级**: 复杂任务前先搜索、调研、对比方案
-- **B级**: 中等任务有探索意识，简单任务直接动手
-- **C级**: 偶尔探索，大部分情况直接编码
-- **D级**: 从不探索，直接上手写代码
-
-**判断依据：**
-- 看 session samples 中是否有搜索工具的使用
-- 首条 prompt 是否体现了对问题的调研
-- 是否引用外部资源、最佳实践
-
-**示例评语：**
-> "你在这个 skill 改造任务中，先让我看了现有实现，再提出改进方案。这就是 Explore First 的实践——先理解现状，再动手修改。"
+- 看复杂任务是否先做背景调查、现状确认、约束核对
+- 看是否先让 agent “读现有实现/文档”再修改
 
 #### 3. 质量监督 (Oversight)
 
-**评估标准：**
-- **A级**: 几乎每个任务都有验证步骤，主动要求测试、审查
-- **B级**: 大部分任务有验证意识，知道要测但不一定系统
-- **C级**: 偶尔验证，经常"看起来对了就过"
-- **D级**: 从不主动验证，完全依赖 agent 自检
-
-**判断依据：**
-- session samples 中是否有测试、验证相关的工具调用
-- outcome 数据中 "buggy_code" 摩擦类型的频率
-- 是否有明确的验收动作
-
-**示例评语：**
-> "你的验证覆盖率很高。比如这个报告中，你明确要求我生成截图验证 HTML 渲染效果。这种'Oversight and scrutiny are no longer optional'的意识很好。"
+- 看是否主动要求测试、验证、回归、截图或 diff 复核
+- 看是否有明确“什么算完成”的质量门槛
 
 #### 4. 一次达成 (First-Pass)
 
-**评估标准：**
-- **A级**: 一次对齐后，90%+ 的任务能直接完成，很少返工
-- **B级**: 大部分任务一次达成，偶尔需要微调
-- **C级**: 经常需要 2-3 轮对齐才能完成任务
-- **D级**: 大量返工，需求经常在中途改变
-
-**判断依据：**
-- outcome 分布中 "fully_achieved" 的比例
-- friction 数据中 "misunderstood_request" 的频率
-- session 长度分布（长会话往往意味着返工）
-
-**示例评语：**
-> "这个 session 是个很好的 First-Pass 例子。你一次就说清楚了要移除关键词评分、改为 AI 专家模式，我直接执行就完成了，没有返工。"
+- 看请求是否一次说清楚，减少返工
+- 看会话中是否频繁改方向或补需求
 
 #### 5. 并行 Agent (Parallel)
 
-**评估标准：**
-- **A级**: 熟练使用多 agent 并行，善用 git worktree
-- **B级**: 有意识地并行处理独立任务
-- **C级**: 偶尔并行，大部分串行
-- **D级**: 单线程思维，一个任务做完才做下一个
+- 看是否把可并行任务拆分给不同 agent/worktree
+- 看是否具备并发思维，而非单线程线性推进
 
-**判断依据：**
-- 项目切换频率
-- 会话时间分布（是否有并发会话）
-- 工具多样性（是否同时用多个工具）
+## 输出硬约束（必须遵守）
 
-**示例评语：**
-> "你在并行方面有提升空间。比如这次 skill 修改和报告生成，理论上是独立的，可以考虑用 sub-agent 并行处理。"
+1. 禁止输出任何 `x/100`、百分比、加权总分。
+2. 禁止“关键词命中=评分”的程序化表达。
+3. 每个维度必须包含:
+   - `等级`: A/B/C/D（主观）
+   - `证据`: 至少 1 条真实 session（建议 2 条）
+   - `评语`: 为什么这样判断
+   - `改进动作`: 可执行、可落地
+4. 总结里可以给“总体评级（主观）”，但不能带数字。
+5. 若样本不足，必须明确写出“证据不足 + 如何补采样”。
 
-### 评分输出格式
+## 推荐输出骨架
 
-每个维度给出：
-1. **等级**: A/B/C/D
-2. **具体例子**: 引用 1-2 个 session sample 作为证据
-3. **简要解释**: 为什么给这个等级
-4. **改进建议**: 如果是 B/C/D，给出具体改进方向
-
-### 整体评估输出
-
-```markdown
-## 🧠 Karpathy's Agentic Engineering Assessment
-
-### 总体印象
-[一句话总结用户的 Agentic Engineering 水平]
-
-### 5 维度评分
-
-**1. 编排能力 (Orchestration): [等级]**
-- 证据: [引用 session sample]
-- 评语: ...
-- 建议: ...
-
-**2. 先探索后编码 (Explore First): [等级]**
-- 证据: ...
-- 评语: ...
-- 建议: ...
-
-[...其他维度...]
-
-### ✅ 你的优势
-1. ...
-2. ...
-3. ...
-
-### ⚠️ 主要短板
-1. ...
-2. ...
-
-### 🎯 下一步行动
-1. [具体、可执行的建议]
-2. [具体、可执行的建议]
-3. [具体、可执行的建议]
-
-### 💡 Karpathy's Take
-[用 Karpathy 的口吻给出一句金句]
-```
+直接复用:
+- `./templates/karpathy-review-template.md`
+- `./scripts/render_review_html.py`
 
 ---
 

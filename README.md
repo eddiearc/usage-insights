@@ -1,47 +1,58 @@
 # usage-insights-skill
 
-生成 Claude Code 与 Codex CLI 的统一历史复盘报告，包含 **Karpathy Agentic Engineering 评分系统**。
+生成 Claude Code 与 Codex CLI 的统一历史复盘报告，采用 **Karpathy 视角的定性评审**。
 
 ## 核心特性
 
 - 📊 **跨客户端分析**: 同时分析 Claude Code 和 Codex CLI 的使用数据
-- 🧠 **Karpathy Agentic Score**: 基于 Andrej Karpathy 的 Agentic Coding 理念进行 5 维度评分
-- 🔍 **抽样复盘**: 自动抽取最近 20 个 session 的详细内容进行深度分析
-- 📈 **趋势对比**: 最近 14 天 vs 前 14 天的使用趋势
-- 🎨 **美观报告**: 单文件 HTML 输出，支持中文/英文自动切换
+- 🎭 **Karpathy 专家评审**: 基于真实会话样本进行 5 维定性评价
+- 🔍 **抽样复盘**: 自动抽取最近 20 个 session，输出证据文件
+- 🧱 **证据先行**: 先取样，再由 agent 写主观评级与改进建议
+- 🚫 **禁程序化评分**: 不输出 x/100、百分比或加权总分
 
 ## 快速开始
 
 ```bash
-# 生成报告
-python3 ./generate_usage_report.py --source auto --output ./report.html
+# 1) 抽取跨客户端会话样本（默认 20 条）
+bash ./scripts/collect_session_samples.sh \
+  --source auto \
+  --limit 20 \
+  --output-dir ./artifacts
 
-# 指定语言
-python3 ./generate_usage_report.py --locale zh
+# 2) 按模板写专家复盘（由 agent 完成）
+# 使用 ./templates/karpathy-review-template.md
 
-# 仅分析 Claude Code
-python3 ./generate_usage_report.py --source claude
-
-# 仅分析 Codex CLI  
-python3 ./generate_usage_report.py --source codex
+# 3) 渲染简洁高对比 HTML（优缺点颜色化 + 重点加粗）
+python3 ./scripts/render_review_html.py \
+  --input ./artifacts/usage-insights-review.md \
+  --output ./artifacts/usage-insights-review.html
 ```
 
 ## 输出文件
 
-- `report.html` - 可视化报告
-- `report.evidence.json` - 结构化证据数据（包含 Karpathy Score）
+- `artifacts/session-samples.json` - 结构化会话样本
+- `artifacts/session-samples.md` - 人类可读样本摘要
+- `artifacts/usage-insights-review.md` - 最终专家评审报告（由 agent 生成）
+- `artifacts/usage-insights-review.html` - 可视化复盘页面（优缺点高亮）
 
-## Karpathy Agentic Engineering 评分
+## 评审方式（非评分器）
 
-基于 Andrej Karpathy 的 Agentic Coding 理念：
+基于 Andrej Karpathy 的 Agentic Coding 理念，从 5 个维度给出主观评级:
 
-| 维度 | 权重 | 指标 | 原文出处 |
-|------|------|------|----------|
-| **编排能力** | 20% | 规划信号、任务分解 | "The future of engineering management: orchestrating AI agents, not writing code" |
-| **先探索后编码** | 20% | 探索:实现比例 | "prioritizes web search and exploration before coding" |
-| **质量监督** | 20% | 验证信号、测试 | "Oversight and scrutiny are no longer optional" |
-| **一次达成** | 20% | 返工率 | "leverage without sacrificing software quality" |
-| **并行 Agent** | 20% | 工具多样性、项目数 | "parallel coding agents with git worktrees" |
+| 维度 | 评审重点 |
+|------|----------|
+| 编排能力 (Orchestration) | 有没有先拆解任务、定义验收 |
+| 先探索后编码 (Explore First) | 有没有先理解现状再改动 |
+| 质量监督 (Oversight) | 有没有主动要求验证/测试 |
+| 一次达成 (First-Pass) | 指令是否清晰、返工是否可控 |
+| 并行 Agent (Parallel) | 是否具备并行拆任务思维 |
+
+最终仅允许:
+- 维度等级: `A/B/C/D`（主观）
+- 总体评级: `A/B/C/D`（主观）
+
+禁止:
+- `92/100`、`53%`、`权重加权`、`关键词命中分`
 
 ### 参考链接
 
@@ -55,7 +66,9 @@ python3 ./generate_usage_report.py --source codex
 | 文件 | 说明 |
 |------|------|
 | `SKILL.md` | 核心使用说明、触发语义、参数示例 |
-| `generate_usage_report.py` | 主脚本，生成 HTML 报告和 evidence.json |
+| `scripts/collect_session_samples.sh` | 会话样本抽取脚本（不做评分） |
+| `scripts/render_review_html.py` | Markdown 评审报告渲染为 HTML（优缺点颜色化） |
+| `templates/karpathy-review-template.md` | 专家评审模板 |
 | `README.md` | 本文件 |
 
 ## 默认数据源
@@ -76,11 +89,12 @@ python3 ./generate_usage_report.py --source codex
 
 ## 版本历史
 
-### v2.0.0 (2026-03-03)
-- ✨ 新增 Karpathy Agentic Engineering 评分系统
-- ✨ 新增抽样复盘功能（最近 20 个 session）
-- 🔥 移除外部 API Key 依赖
-- 📊 Evidence JSON 包含完整分析 prompt
+### v3.0.0 (2026-03-03)
+- 🔥 删除程序化 Python 评分器
+- ✨ 改为证据抽样 + Karpathy 主观评审
+- ✨ 新增样本抽取脚本与评审模板
+- ✨ 新增评审报告 HTML 渲染脚本（优缺点颜色强化）
+- 🚫 默认禁止数字化评分表达
 
 ### v1.0.0
 - 🎉 初始版本
