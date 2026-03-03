@@ -906,31 +906,245 @@ def calc_grade(total_score: int, locale: str) -> str:
     return tr["grade_d"]
 
 
+def analyze_session_for_examples(session_samples: list[dict], locale: str) -> dict[str, list[dict]]:
+    """
+    分析 session samples，提取每个维度的正反案例
+    返回格式：{"orchestration": [{"session_id": ..., "date": ..., "prompt": ..., "type": "good|bad"}, ...], ...}
+    """
+    examples = {
+        "orchestration": [],
+        "explore_first": [],
+        "oversight": [],
+        "first_pass": [],
+        "parallel": [],
+    }
+
+    for sample in session_samples:
+        session_id = sample.get("session_id", "unknown")
+        start_time = sample.get("start_time", "")
+        first_prompt = sample.get("first_prompt", "")
+        outcome = sample.get("outcome", "unknown")
+        friction_types = sample.get("friction_types", [])
+        tool_sequence = sample.get("tool_sequence", [])
+        intent = sample.get("intent", "")
+
+        # Parse date from start_time
+        date_str = ""
+        if start_time:
+            try:
+                dt = parse_iso(start_time) if isinstance(start_time, str) else None
+                if dt:
+                    date_str = dt.strftime("%Y-%m-%d")
+            except:
+                pass
+
+        # Skip empty samples
+        if not first_prompt:
+            continue
+
+        # --- Orchestration: 任务分解和规划 ---
+        has_planning = has_any_pattern(first_prompt, PLANNING_PATTERNS)
+        has_steps = any(kw in first_prompt.lower() for kw in ["步骤", "step", "分解", "拆分", "阶段", "phase", "里程碑", "milestone"])
+        has_acceptance = has_any_pattern(first_prompt, ACCEPTANCE_PATTERNS)
+
+        if has_planning or has_steps:
+            examples["orchestration"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "prompt_snippet": first_prompt[:150] + "..." if len(first_prompt) > 150 else first_prompt,
+                "type": "good",
+                "reason": "明确的任务分解或规划信号" if locale == "zh" else "Clear task decomposition or planning",
+            })
+        elif len(first_prompt) > 100 and not has_acceptance and outcome in ["partially_achieved", "not_achieved"]:
+            # 长提示但没有规划，且结果不好
+            examples["orchestration"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "prompt_snippet": first_prompt[:150] + "..." if len(first_prompt) > 150 else first_prompt,
+                "type": "bad",
+                "reason": "长任务缺乏明确分解，结果未达成" if locale == "zh" else "Long task without clear decomposition, outcome not achieved",
+            })
+
+        # --- Explore First: 先探索后编码 ---
+        has_research = any(kw in first_prompt.lower() for kw in ["搜索", "search", "调研", "research", "了解", "understand", "看看", "check", "怎么", "how to"])
+        is_quick_impl = intent in ["code_implementation", "release_build"] and not has_research
+
+        if intent in ["quick_question", "debugging"] or has_research:
+            examples["explore_first"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "prompt_snippet": first_prompt[:150] + "..." if len(first_prompt) > 150 else first_prompt,
+                "type": "good",
+                "reason": "编码前进行探索或调研" if locale == "zh" else "Exploration before implementation",
+            })
+        elif is_quick_impl and len(first_prompt) < 80:
+            # 直接要求实现，没有前期探索
+            examples["explore_first"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "prompt_snippet": first_prompt[:150] + "..." if len(first_prompt) > 150 else first_prompt,
+                "type": "bad",
+                "reason": "直接要求实现，缺乏前期探索" if locale == "zh" else "Direct implementation request without exploration",
+            })
+
+        # --- Oversight: 质量监督 ---
+        has_verification = has_any_pattern(first_prompt, VERIFICATION_PATTERNS)
+        if has_verification:
+            examples["oversight"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "prompt_snippet": first_prompt[:150] + "..." if len(first_prompt) > 150 else first_prompt,
+                "type": "good",
+                "reason": "主动要求验证或测试" if locale == "zh" else "Explicit verification request",
+            })
+
+        # --- First Pass: 一次达成 ---
+        has_rework = sample.get("has_rework_signal", False) if sample.get("source") == "codex" else any(f in str(friction_types).lower() for f in ["rework", "edit", "修改", "返工"])
+
+        if outcome == "fully_achieved" and not has_rework and not friction_types:
+            examples["first_pass"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "prompt_snippet": first_prompt[:150] + "..." if len(first_prompt) > 150 else first_prompt,
+                "type": "good",
+                "reason": "一次达成，无返工信号" if locale == "zh" else "First-pass completion, no rework signals",
+            })
+        elif has_rework or outcome in ["not_achieved", "partially_achieved"]:
+            friction_info = ", ".join(friction_types[:2]) if friction_types else "返工信号"
+            examples["first_pass"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "prompt_snippet": first_prompt[:150] + "..." if len(first_prompt) > 150 else first_prompt,
+                "type": "bad",
+                "reason": f"返工或结果未达成: {friction_info}" if locale == "zh" else f"Rework or incomplete: {friction_info}",
+            })
+
+        # --- Parallel: 并行 Agent ---
+        unique_tools = len(set(tool_sequence))
+        if unique_tools >= 3:
+            examples["parallel"].append({
+                "session_id": session_id,
+                "date": date_str,
+                "prompt_snippet": f"工具序列: {', '.join(tool_sequence[:5])}",
+                "type": "good",
+                "reason": f"单会话使用 {unique_tools} 种工具，可能并行处理多个任务" if locale == "zh" else f"Used {unique_tools} tools in single session",
+            })
+
+    return examples
+
+
 def calculate_karpathy_agentic_score(data: AggregatedData, session_samples: list, locale: str) -> dict[str, Any]:
     """
     生成 Karpathy Agentic Engineering 分析所需的数据
-    注意：不再使用关键词评分，而是返回结构化证据供 AI 专家分析
+    基于真实 session samples 提供具体案例分析
     原文出处：Karpathy 关于 Agentic Coding 的推文和演讲
     """
     total_messages = max(1, data.total_user_messages)
     total_sessions = max(1, data.total_sessions)
     avg_tool_diversity = avg(data.session_tool_diversities)
     project_count = len(data.project_counts)
-    
-    # 计算基础统计（仅用于参考，不作为最终评分）
+
+    # 计算基础统计
     planning_rate = safe_div(data.planning_signals, total_messages)
     verification_rate = safe_div(data.verification_signals, total_messages)
     followup_rate = safe_div(data.followup_signals, total_messages)
-    
-    # 5 个维度的评估框架（供 AI 专家分析使用）
+
+    # 从 session samples 中提取具体案例
+    concrete_examples = analyze_session_for_examples(session_samples, locale)
+
+    # 5 个维度的评估框架，包含具体案例
     criteria = KARPATHY_AGENTIC_CRITERIA[locale]
-    
-    # 计算 explore_ratio 用于 interpretation
+
+    # 计算 explore_ratio
     explore_intents = data.intent_counts.get("quick_question", 0) + data.intent_counts.get("debugging", 0)
     implementation_intents = data.intent_counts.get("code_implementation", 0) + data.intent_counts.get("release_build", 0)
     total_categorized = explore_intents + implementation_intents
     explore_ratio = safe_div(explore_intents, total_categorized) if total_categorized > 0 else 0
-    
+
+    # 为每个维度生成基于真实案例的评价
+    def generate_dimension_evaluation(
+        dim_id: str,
+        metric_value: float,
+        good_threshold: float,
+        bad_threshold: float,
+        good_examples: list,
+        bad_examples: list,
+    ) -> dict:
+        """基于指标和真实案例生成维度评价"""
+        examples_good = good_examples[:2]  # 最多2个正面案例
+        examples_bad = bad_examples[:2]   # 最多2个负面案例
+
+        # 生成评分
+        if metric_value >= good_threshold:
+            score = min(100, int(75 + (metric_value - good_threshold) / (1 - good_threshold) * 25))
+            grade = "A"
+        elif metric_value >= bad_threshold:
+            score = int(50 + (metric_value - bad_threshold) / (good_threshold - bad_threshold) * 25)
+            grade = "B" if metric_value > (good_threshold + bad_threshold) / 2 else "C"
+        else:
+            score = max(0, int(metric_value / bad_threshold * 50))
+            grade = "D"
+
+        # 生成评价文本
+        if locale == "zh":
+            if examples_good and examples_bad:
+                evaluation = f"表现混合：有{len(examples_good)}个做得好的案例，也有{len(examples_bad)}个需要改进的案例。"
+            elif examples_good:
+                evaluation = f"表现较好：在{len(examples_good)}个案例中都展现了良好的实践。"
+            elif examples_bad:
+                evaluation = f"需要改进：在{len(examples_bad)}个案例中暴露出明显问题。"
+            else:
+                evaluation = "样本不足，无法给出基于具体案例的评价。"
+        else:
+            if examples_good and examples_bad:
+                evaluation = f"Mixed performance: {len(examples_good)} good examples but {len(examples_bad)} areas needing improvement."
+            elif examples_good:
+                evaluation = f"Good performance: demonstrated best practices in {len(examples_good)} cases."
+            elif examples_bad:
+                evaluation = f"Needs improvement: issues identified in {len(examples_bad)} cases."
+            else:
+                evaluation = "Insufficient samples for case-based evaluation."
+
+        return {
+            "score": score,
+            "grade": grade,
+            "metric_value": round(metric_value, 3),
+            "evaluation": evaluation,
+            "examples_good": examples_good,
+            "examples_bad": examples_bad,
+        }
+
+    # 为每个维度生成详细评估
+    orchestration_eval = generate_dimension_evaluation(
+        "orchestration", planning_rate, 0.25, 0.1,
+        concrete_examples["orchestration"],
+        [e for e in concrete_examples["orchestration"] if e["type"] == "bad"]
+    )
+
+    explore_eval = generate_dimension_evaluation(
+        "explore_first", explore_ratio, 0.3, 0.15,
+        concrete_examples["explore_first"],
+        [e for e in concrete_examples["explore_first"] if e["type"] == "bad"]
+    )
+
+    oversight_eval = generate_dimension_evaluation(
+        "oversight", verification_rate, 0.25, 0.1,
+        concrete_examples["oversight"],
+        []  # Oversight 只有正面案例（主动要求验证）
+    )
+
+    first_pass_eval = generate_dimension_evaluation(
+        "first_pass", 1 - followup_rate, 0.75, 0.5,  # 返工率越低越好
+        concrete_examples["first_pass"],
+        [e for e in concrete_examples["first_pass"] if e["type"] == "bad"]
+    )
+
+    parallel_eval = generate_dimension_evaluation(
+        "parallel", min(1.0, avg_tool_diversity / 5), 0.6, 0.3,
+        concrete_examples["parallel"],
+        []
+    )
+
     analysis_framework = {
         "orchestration": {
             "id": "orchestration",
@@ -938,22 +1152,23 @@ def calculate_karpathy_agentic_score(data: AggregatedData, session_samples: list
             "description": criteria[0]["description"],
             "source": criteria[0]["source"],
             "indicators": criteria[0]["indicators"],
+            "evaluation": orchestration_eval,
             "raw_data": {
                 "planning_signals_count": data.planning_signals,
                 "planning_rate": round(planning_rate, 3),
                 "avg_messages_per_session": round(total_messages / total_sessions, 1),
-                "note": "AI专家应基于session_samples中的prompt分析用户是否善于任务分解和编排"
             }
         },
         "explore_first": {
-            "id": "explore_first", 
+            "id": "explore_first",
             "name": criteria[1]["name"],
             "description": criteria[1]["description"],
             "source": criteria[1]["source"],
             "indicators": criteria[1]["indicators"],
+            "evaluation": explore_eval,
             "raw_data": {
                 "intent_distribution": dict(data.intent_counts.most_common(10)),
-                "note": "AI专家应分析session_samples中的first_prompt，判断是否先探索后编码"
+                "explore_ratio": round(explore_ratio, 3),
             }
         },
         "oversight": {
@@ -962,11 +1177,11 @@ def calculate_karpathy_agentic_score(data: AggregatedData, session_samples: list
             "description": criteria[2]["description"],
             "source": criteria[2]["source"],
             "indicators": criteria[2]["indicators"],
+            "evaluation": oversight_eval,
             "raw_data": {
                 "verification_signals_count": data.verification_signals,
                 "verification_rate": round(verification_rate, 3),
                 "tool_diversity_avg": round(avg_tool_diversity, 2),
-                "note": "AI专家应基于session_samples分析用户是否有主动验证和质量监督意识"
             }
         },
         "first_pass": {
@@ -975,12 +1190,12 @@ def calculate_karpathy_agentic_score(data: AggregatedData, session_samples: list
             "description": criteria[3]["description"],
             "source": criteria[3]["source"],
             "indicators": criteria[3]["indicators"],
+            "evaluation": first_pass_eval,
             "raw_data": {
                 "followup_signals_count": data.followup_signals,
                 "followup_rate": round(followup_rate, 3),
                 "outcome_distribution": dict(data.outcome_counts),
                 "friction_types": dict(data.friction_counts.most_common(5)),
-                "note": "AI专家应基于outcome和friction数据，以及session_samples分析一次达成率"
             }
         },
         "parallel": {
@@ -989,20 +1204,89 @@ def calculate_karpathy_agentic_score(data: AggregatedData, session_samples: list
             "description": criteria[4]["description"],
             "source": criteria[4]["source"],
             "indicators": criteria[4]["indicators"],
+            "evaluation": parallel_eval,
             "raw_data": {
                 "avg_tool_diversity_per_session": round(avg_tool_diversity, 2),
                 "unique_projects": project_count,
                 "project_paths": list(data.project_counts.keys())[:10],
-                "note": "AI专家应基于project_paths和工具使用分析并行Agent使用情况"
             }
         }
     }
-    
+
+    # 计算总分
+    total_score = sum([
+        orchestration_eval["score"],
+        explore_eval["score"],
+        oversight_eval["score"],
+        first_pass_eval["score"],
+        parallel_eval["score"],
+    ]) / 5
+
+    # 生成总评等级
+    if total_score >= 85:
+        overall_grade = "A"
+    elif total_score >= 70:
+        overall_grade = "B"
+    elif total_score >= 55:
+        overall_grade = "C"
+    else:
+        overall_grade = "D"
+
+    # 生成基于真实案例的具体建议
+    concrete_recommendations = []
+    if locale == "zh":
+        # 基于负面案例生成具体建议
+        for dim_id, dim_data in analysis_framework.items():
+            bad_examples = dim_data["evaluation"].get("examples_bad", [])
+            if bad_examples:
+                for ex in bad_examples[:1]:  # 每个维度取一个案例
+                    date_info = f"{ex['date']} / " if ex.get('date') else ""
+                    rec = f"【{dim_data['name']}】{date_info}{ex['session_id'][:20]}...: {ex['reason']}。建议: "
+                    if dim_id == "orchestration":
+                        rec += "在任务开始时明确列出步骤和验收标准。"
+                    elif dim_id == "explore_first":
+                        rec += "复杂任务前先搜索调研，了解现有方案。"
+                    elif dim_id == "oversight":
+                        rec += "主动要求验证步骤，如测试或代码审查。"
+                    elif dim_id == "first_pass":
+                        rec += " upfront 明确需求，减少后期返工。"
+                    elif dim_id == "parallel":
+                        rec += "尝试用 git worktree 并行处理独立任务。"
+                    concrete_recommendations.append(rec)
+    else:
+        for dim_id, dim_data in analysis_framework.items():
+            bad_examples = dim_data["evaluation"].get("examples_bad", [])
+            if bad_examples:
+                for ex in bad_examples[:1]:
+                    date_info = f"{ex['date']} / " if ex.get('date') else ""
+                    rec = f"[{dim_data['name']}] {date_info}{ex['session_id'][:20]}...: {ex['reason']}. Suggestion: "
+                    if dim_id == "orchestration":
+                        rec += "List steps and acceptance criteria at the start."
+                    elif dim_id == "explore_first":
+                        rec += "Research existing solutions before implementing."
+                    elif dim_id == "oversight":
+                        rec += "Explicitly request verification steps."
+                    elif dim_id == "first_pass":
+                        rec += "Clarify requirements upfront to reduce rework."
+                    elif dim_id == "parallel":
+                        rec += "Use git worktrees for parallel tasks."
+                    concrete_recommendations.append(rec)
+
     return {
-        "analysis_mode": "ai_expert",  # 标记为 AI 专家分析模式
-        "note": "以下数据供AI专家（扮演Andrej Karpathy）进行分析，不再使用关键词评分",
-        "session_samples_for_analysis": session_samples[:20] if session_samples else [],
+        "analysis_mode": "evidence_based",  # 基于证据的分析模式
+        "note": "基于真实 session samples 的 Agentic Engineering 评估",
+        "total_score": round(total_score, 1),
+        "overall_grade": overall_grade,
+        "concrete_examples_summary": {
+            "total_samples_analyzed": len(session_samples),
+            "orchestration_examples": len(concrete_examples["orchestration"]),
+            "explore_first_examples": len(concrete_examples["explore_first"]),
+            "oversight_examples": len(concrete_examples["oversight"]),
+            "first_pass_examples": len(concrete_examples["first_pass"]),
+            "parallel_examples": len(concrete_examples["parallel"]),
+        },
         "dimensions": analysis_framework,
+        "concrete_recommendations": concrete_recommendations[:5],  # 最多5条具体建议
         "raw_metrics": {
             "total_sessions": total_sessions,
             "total_messages": total_messages,
@@ -1010,17 +1294,9 @@ def calculate_karpathy_agentic_score(data: AggregatedData, session_samples: list
             "planning_rate": planning_rate,
             "verification_rate": verification_rate,
             "followup_rate": followup_rate,
-            "followup_rate": followup_rate,
             "avg_tool_diversity": avg_tool_diversity,
             "project_count": project_count,
         },
-        "interpretation": {
-            "orchestration": "High planning signals indicate good task decomposition" if planning_rate > 0.2 else "Need more explicit task planning",
-            "explore_first": "Good balance of exploration vs implementation" if 0.2 < explore_ratio < 0.5 else "May need more upfront exploration",
-            "oversight": "Strong verification habits" if verification_rate > 0.25 else "Consider adding more verification steps",
-            "first_pass": "Excellent first-pass completion" if followup_rate < 0.15 else "High rework rate, consider clearer requirements",
-            "parallel": "Good use of parallel workflows" if avg_tool_diversity > 3 else "Could benefit from more parallel agent usage",
-        }
     }
 
 
@@ -1349,6 +1625,40 @@ def sample_recent_sessions(
 
 def generate_evidence_json(evidence: EvidenceData, output_path: Path) -> None:
     """生成证据 JSON 文件，供 Agent 分析使用"""
+
+    # 构建基于真实案例的分析摘要
+    karpathy = evidence.karpathy_score
+    case_summary = ""
+
+    if karpathy and karpathy.get("dimensions"):
+        case_summary = "\n\n## 基于真实案例的评估结果\n\n"
+        for dim_id, dim_data in karpathy.get("dimensions", {}).items():
+            eval_data = dim_data.get("evaluation", {})
+            case_summary += f"\n### {dim_data.get('name', dim_id)} (评分: {eval_data.get('score', 0)}/100, 等级: {eval_data.get('grade', 'N/A')})\n"
+            case_summary += f"评价: {eval_data.get('evaluation', '')}\n"
+
+            good_examples = eval_data.get("examples_good", [])
+            bad_examples = eval_data.get("examples_bad", [])
+
+            if good_examples:
+                case_summary += "\n做得好的案例:\n"
+                for ex in good_examples[:2]:
+                    date_info = f"{ex['date']} / " if ex.get('date') else ""
+                    case_summary += f"- {date_info}{ex['session_id']}: {ex['reason']}\n"
+                    case_summary += f"  内容片段: \"{ex['prompt_snippet'][:100]}...\"\n"
+
+            if bad_examples:
+                case_summary += "\n需要改进的案例:\n"
+                for ex in bad_examples[:2]:
+                    date_info = f"{date_info} / " if ex.get('date') else ""
+                    case_summary += f"- {date_info}{ex['session_id']}: {ex['reason']}\n"
+                    case_summary += f"  内容片段: \"{ex['prompt_snippet'][:100]}...\"\n"
+
+        if karpathy.get("concrete_recommendations"):
+            case_summary += "\n\n基于案例的具体建议:\n"
+            for rec in karpathy["concrete_recommendations"]:
+                case_summary += f"- {rec}\n"
+
     evidence_dict = {
         "metrics": evidence.metrics,
         "trends": evidence.trends,
@@ -1360,56 +1670,23 @@ def generate_evidence_json(evidence: EvidenceData, output_path: Path) -> None:
         },
         "raw_counts": evidence.raw_counts,
         "session_samples": evidence.session_samples,
-        "karpathy_agentic_score": evidence.karpathy_score,  # Karpathy 评分
-        "analysis_prompt": """
+        "karpathy_agentic_score": evidence.karpathy_score,
+        "analysis_summary": case_summary,
+        "analysis_prompt": f"""
 基于以上证据数据，请进行 Agentic 深度分析：
 
-## 1. 通用分析
-- **核心洞察**: 从数据中发现的最重要 3 个使用模式或问题
-- **优势强化**: 基于高分维度，建议如何进一步放大优势  
-- **改进优先级**: 基于低分维度，给出具体可执行的改进步骤
+## 1. 基于真实案例的评估（已自动生成）
+{case_summary}
 
-## 2. Karpathy Agentic Engineering 评估 (模拟 Andrej Karpathy 打分)
-请基于以下 5 个维度进行评估，每个维度标注原文出处：
-并且每个维度必须包含至少 1 条来自 session_samples 的证据，证据必须包含：
-- 会话标识（session_id 或可唯一定位的信息）
-- 绝对日期（YYYY-MM-DD）
-- 具体行为片段（做得好/做得不好）
+## 2. 补充分析建议
+请基于上述案例和数据，进一步分析：
 
-1. **编排能力 (Orchestration)** 
-   - 原文: "The future of engineering management: orchestrating AI agents, not writing code"
-   - 评分: X/100
-   - 评价: ...
+- **模式识别**: 从案例中发现重复出现的行为模式
+- **根本原因**: 负面案例背后的根本原因是什么
+- **可操作建议**: 给出3-5条具体、可执行的下月改进计划
 
-2. **先探索后编码 (Explore Before Code)**
-   - 原文: "prioritizes web search and exploration before coding"
-   - 评分: X/100
-   - 评价: ...
-
-3. **质量监督 (Quality Oversight)**
-   - 原文: "Oversight and scrutiny are no longer optional"
-   - 评分: X/100
-   - 评价: ...
-
-4. **一次达成 (First-Pass)**
-   - 原文: "leverage without sacrificing software quality"
-   - 评分: X/100
-   - 评价: ...
-
-5. **并行 Agent (Parallel Agents)**
-   - 原文: "parallel coding agents with git worktrees"
-   - 评分: X/100
-   - 评价: ...
-
-**总分**: X/100 (Grade: X)
-
-## 2.1 必须给出正反案例（不可省略）
-- 做得好的案例：至少 1 条，格式示例：`2026-02-02 / session_xxx：先定义步骤与验收标准，再执行`
-- 做得不好的案例：至少 1 条，格式示例：`2026-03-01 / session_yyy：未对齐验收标准，导致多轮返工`
-- 严禁只给抽象评价，不给可追溯样本
-
-## 3. Karpathy 式建议
-用 Andrej Karpathy 的口吻给出 3-5 条具体、可执行的建议，风格要技术、直接、有洞察力。
+## 3. Karpathy 式总结
+用 Andrej Karpathy 的口吻给出一段简洁有力的总结，风格要技术、直接、有洞察力。
 """
     }
     output_path.write_text(json.dumps(evidence_dict, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1478,90 +1755,94 @@ def build_html_report(
     </section>
     """
 
-    # Karpathy Agentic Score 区块 - 简化展示
+    # Karpathy Agentic Score 区块 - 基于真实案例的展示
     karpathy = evidence.karpathy_score
     karpathy_dimensions_html = ""
-    
-    if karpathy and karpathy.get("analysis_mode") == "ai_expert":
-        # 计算各维度评分并生成简化展示
+
+    if karpathy and karpathy.get("dimensions"):
         dimensions_data = karpathy.get("dimensions", {})
-        
-        # 基于 metrics 计算各维度等级
-        metrics = evidence.metrics
-        first_pass_rate = metrics.get("first_pass_rate", 0)
-        verification_rate = metrics.get("verification_rate", 0)
-        planning_rate = metrics.get("planning_rate", 0)
-        rework_rate = metrics.get("rework_rate", 0)
-        avg_tool_diversity = metrics.get("avg_tool_diversity", 0)
-        
-        # 定义评分逻辑和评语
-        dim_evaluations = [
-            {
-                "name": "编排能力 (Orchestration)" if locale == "zh" else "Orchestration",
-                "grade": "A" if planning_rate > 0.25 else "B" if planning_rate > 0.15 else "C" if planning_rate > 0.08 else "D",
-                "comment": "任务分解清晰，规划意识强" if planning_rate > 0.2 else "规划有提升空间" if locale == "zh" else "Clear task decomposition" if planning_rate > 0.2 else "Room for planning improvement",
-                "suggestion": "继续保持任务拆解习惯，将大任务分解为可验证的小步骤" if locale == "zh" else "Maintain task breakdown habits"
-            },
-            {
-                "name": "先探索后编码 (Explore First)" if locale == "zh" else "Explore Before Code",
-                "grade": "A" if first_pass_rate > 0.7 else "B" if first_pass_rate > 0.55 else "C" if first_pass_rate > 0.4 else "D",
-                "comment": "编码前调研充分，方案选择合理" if first_pass_rate > 0.6 else "建议增加前期探索" if locale == "zh" else "Good exploration habits" if first_pass_rate > 0.6 else "Increase upfront exploration",
-                "suggestion": "复杂任务前先搜索调研，避免直接上手编码" if locale == "zh" else "Research before coding on complex tasks"
-            },
-            {
-                "name": "质量监督 (Oversight)" if locale == "zh" else "Quality Oversight",
-                "grade": "A" if verification_rate > 0.3 else "B" if verification_rate > 0.2 else "C" if verification_rate > 0.1 else "D",
-                "comment": "验证意识强，质量把控到位" if verification_rate > 0.25 else "验证覆盖有待加强" if locale == "zh" else "Strong verification habits" if verification_rate > 0.25 else "Improve verification coverage",
-                "suggestion": "为每类任务添加默认验证步骤（测试/lint/回归）" if locale == "zh" else "Add default verification steps for each task type"
-            },
-            {
-                "name": "一次达成 (First-Pass)" if locale == "zh" else "First-Pass Completion",
-                "grade": "A" if rework_rate < 0.15 else "B" if rework_rate < 0.25 else "C" if rework_rate < 0.4 else "D",
-                "comment": "返工率低，需求理解准确" if rework_rate < 0.2 else "返工率偏高，需明确验收标准" if locale == "zh" else "Low rework rate" if rework_rate < 0.2 else "High rework rate, clarify requirements",
-                "suggestion": "任务开始前明确验收标准，减少后期返工" if locale == "zh" else "Define acceptance criteria upfront"
-            },
-            {
-                "name": "并行 Agent (Parallel)" if locale == "zh" else "Parallel Agents",
-                "grade": "A" if avg_tool_diversity > 4 else "B" if avg_tool_diversity > 3 else "C" if avg_tool_diversity > 2 else "D",
-                "comment": "工具使用多样，并行工作效率高" if avg_tool_diversity > 3 else "可尝试更多并行工作流" if locale == "zh" else "Good tool diversity" if avg_tool_diversity > 3 else "Explore more parallel workflows",
-                "suggestion": "对独立子任务使用 git worktree 并行处理" if locale == "zh" else "Use git worktrees for parallel task handling"
-            },
-        ]
-        
-        # 计算总评
-        grade_scores = {"A": 4, "B": 3, "C": 2, "D": 1}
-        total_score = sum(grade_scores.get(d["grade"], 0) for d in dim_evaluations)
-        avg_score = total_score / len(dim_evaluations)
-        overall_grade = "A" if avg_score >= 3.5 else "B" if avg_score >= 2.5 else "C" if avg_score >= 1.5 else "D"
-        
-        # 生成简化 HTML
-        for dim in dim_evaluations:
-            grade_color = {"A": "#22c55e", "B": "#06b6d4", "C": "#f59e0b", "D": "#ef4444"}.get(dim["grade"], "#888")
+        overall_grade = karpathy.get("overall_grade", "N/A")
+        total_score = karpathy.get("total_score", 0)
+        concrete_recommendations = karpathy.get("concrete_recommendations", [])
+
+        # 生成每个维度的详细展示
+        for dim_id, dim_data in dimensions_data.items():
+            eval_data = dim_data.get("evaluation", {})
+            grade = eval_data.get("grade", "N/A")
+            score = eval_data.get("score", 0)
+            evaluation_text = eval_data.get("evaluation", "")
+            good_examples = eval_data.get("examples_good", [])
+            bad_examples = eval_data.get("examples_bad", [])
+
+            grade_color = {"A": "#22c55e", "B": "#06b6d4", "C": "#f59e0b", "D": "#ef4444"}.get(grade, "#888")
+
+            # 构建案例展示HTML
+            examples_html = ""
+            if good_examples or bad_examples:
+                examples_html += '<div style="margin-top: 0.75rem; padding: 0.75rem; background: var(--bg); border-radius: 6px; font-size: 0.8rem;">'
+
+                # 正面案例
+                if good_examples:
+                    examples_html += '<div style="margin-bottom: 0.5rem;"><strong style="color: #22c55e;">✓ 做得好的案例:</strong></div>'
+                    for ex in good_examples[:1]:  # 只显示一个案例避免过长
+                        date_info = f"{ex['date']} / " if ex.get('date') else ""
+                        examples_html += f'<div style="margin-left: 0.5rem; margin-bottom: 0.5rem; color: var(--text-secondary);">'
+                        examples_html += f'<div style="font-size: 0.75rem; margin-bottom: 0.2rem;">{date_info}{ex["session_id"][:25]}...</div>'
+                        examples_html += f'<div style="font-style: italic; color: var(--text);">"{html.escape(ex["prompt_snippet"][:80])}..."</div>'
+                        examples_html += f'<div style="color: #22c55e; margin-top: 0.2rem;">{html.escape(ex["reason"])}</div>'
+                        examples_html += '</div>'
+
+                # 负面案例
+                if bad_examples:
+                    examples_html += '<div style="margin-top: 0.5rem;"><strong style="color: #ef4444;">✗ 需要改进的案例:</strong></div>'
+                    for ex in bad_examples[:1]:  # 只显示一个案例避免过长
+                        date_info = f"{ex['date']} / " if ex.get('date') else ""
+                        examples_html += f'<div style="margin-left: 0.5rem; margin-bottom: 0.5rem; color: var(--text-secondary);">'
+                        examples_html += f'<div style="font-size: 0.75rem; margin-bottom: 0.2rem;">{date_info}{ex["session_id"][:25]}...</div>'
+                        examples_html += f'<div style="font-style: italic; color: var(--text);">"{html.escape(ex["prompt_snippet"][:80])}..."</div>'
+                        examples_html += f'<div style="color: #ef4444; margin-top: 0.2rem;">{html.escape(ex["reason"])}</div>'
+                        examples_html += '</div>'
+
+                examples_html += '</div>'
+
             karpathy_dimensions_html += f"""
             <div class="karpathy-dim" style="margin-bottom: 1.25rem; padding: 1rem; background: var(--surface-2); border-radius: 8px; border-left: 4px solid {grade_color};">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                <span style="font-weight: 600; color: var(--text);">{html.escape(dim["name"])}</span>
-                <span style="background: {grade_color}; color: white; padding: 0.2rem 0.6rem; border-radius: 4px; font-weight: bold; font-size: 0.9rem;">{dim["grade"]}</span>
+                <span style="font-weight: 600; color: var(--text);">{html.escape(dim_data.get("name", dim_id))}</span>
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                  <span style="color: var(--text-secondary); font-size: 0.85rem;">{score}/100</span>
+                  <span style="background: {grade_color}; color: white; padding: 0.2rem 0.6rem; border-radius: 4px; font-weight: bold; font-size: 0.9rem;">{grade}</span>
+                </div>
               </div>
               <div style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 0.4rem;">
-                {html.escape(dim["comment"])}
+                {html.escape(evaluation_text)}
               </div>
-              <div style="font-size: 0.8rem; color: var(--accent-2);">
-                💡 {html.escape(dim["suggestion"])}
-              </div>
+              {examples_html}
             </div>
             """
-        
+
+        # 生成具体建议HTML
+        recommendations_html = ""
+        if concrete_recommendations:
+            recommendations_html = '<div style="margin-top: 1.5rem; padding: 1rem; background: var(--surface-2); border-radius: 8px;">'
+            recommendations_html += f'<h4 style="margin: 0 0 0.75rem 0; color: var(--accent-2);">{"基于案例的具体建议" if locale == "zh" else "Case-Based Recommendations"}</h4>'
+            recommendations_html += '<ul style="margin: 0; padding-left: 1.2rem; font-size: 0.85rem;">'
+            for rec in concrete_recommendations[:3]:  # 最多显示3条建议
+                recommendations_html += f'<li style="margin: 0.5rem 0;">{html.escape(rec)}</li>'
+            recommendations_html += '</ul></div>'
+
         overall_color = {"A": "#22c55e", "B": "#06b6d4", "C": "#f59e0b", "D": "#ef4444"}.get(overall_grade, "#888")
-        
+
         karpathy_section = f"""
         <section class="karpathy-score">
           <h2>🧠 AI 专家评估 (Karpathy 分析)</h2>
           <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; padding: 1rem; background: var(--surface-2); border-radius: 8px;">
             <span style="font-size: 1.1rem; color: var(--text-secondary);">综合评级</span>
             <span style="background: {overall_color}; color: white; padding: 0.4rem 1rem; border-radius: 6px; font-size: 1.5rem; font-weight: bold;">{overall_grade}</span>
+            <span style="color: var(--text-secondary);">{total_score:.1f}/100</span>
           </div>
           {karpathy_dimensions_html}
+          {recommendations_html}
         </section>
         """
     else:
