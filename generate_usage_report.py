@@ -759,7 +759,9 @@ def build_insights(locale: str, data: AggregatedData, dominant_lang: str) -> lis
             insights.append(f"Language mix: {mix_line}. Dominant language is {'Chinese' if dominant_lang == 'zh' else 'English'}.")
     
     # 数据概览
-    total_msgs = max(1, data.total_user_messages)
+    # 优先使用 source 汇总消息数；若 source 未注入，回退到日维度计数，避免分母退化为 1 导致畸高百分比
+    total_msgs = data.total_user_messages or sum(data.daily_user_messages.values())
+    total_msgs = max(1, total_msgs)
     verification_rate = safe_div(data.verification_signals, total_msgs)
     planning_rate = safe_div(data.planning_signals, total_msgs)
     followup_rate = safe_div(data.followup_signals, total_msgs)
@@ -796,6 +798,21 @@ def avg(values: list[int] | list[float]) -> float:
 
 
 def pct(value: float) -> str:
+    """Format a ratio (0-1) as percentage string.
+
+    Args:
+        value: A ratio between 0 and 1 (e.g., 0.87 for 87%)
+
+    Returns:
+        Formatted percentage string (e.g., "87.0%")
+
+    Note:
+        If value > 1, assumes it's already a percentage and converts accordingly.
+        For example, pct(87) returns "87.0%" instead of "8700.0%".
+    """
+    if value > 1:
+        # Value is already a percentage (e.g., 87), not a ratio (e.g., 0.87)
+        return f"{value:.1f}%"
     return f"{value * 100:.1f}%"
 
 
@@ -1354,6 +1371,10 @@ def generate_evidence_json(evidence: EvidenceData, output_path: Path) -> None:
 
 ## 2. Karpathy Agentic Engineering 评估 (模拟 Andrej Karpathy 打分)
 请基于以下 5 个维度进行评估，每个维度标注原文出处：
+并且每个维度必须包含至少 1 条来自 session_samples 的证据，证据必须包含：
+- 会话标识（session_id 或可唯一定位的信息）
+- 绝对日期（YYYY-MM-DD）
+- 具体行为片段（做得好/做得不好）
 
 1. **编排能力 (Orchestration)** 
    - 原文: "The future of engineering management: orchestrating AI agents, not writing code"
@@ -1381,6 +1402,11 @@ def generate_evidence_json(evidence: EvidenceData, output_path: Path) -> None:
    - 评价: ...
 
 **总分**: X/100 (Grade: X)
+
+## 2.1 必须给出正反案例（不可省略）
+- 做得好的案例：至少 1 条，格式示例：`2026-02-02 / session_xxx：先定义步骤与验收标准，再执行`
+- 做得不好的案例：至少 1 条，格式示例：`2026-03-01 / session_yyy：未对齐验收标准，导致多轮返工`
+- 严禁只给抽象评价，不给可追溯样本
 
 ## 3. Karpathy 式建议
 用 Andrej Karpathy 的口吻给出 3-5 条具体、可执行的建议，风格要技术、直接、有洞察力。
@@ -1420,6 +1446,12 @@ def build_html_report(
     friction_items = [(normalize_friction_key(k, locale), v) for k, v in top_items(data.friction_counts, 5)]
     project_items = top_items(data.project_counts, 6)
 
+    # Calculate actual percentages for display
+    total_msgs_for_pct = max(1, data.total_user_messages)
+    verification_pct = safe_div(data.verification_signals, total_msgs_for_pct) * 100
+    planning_pct = safe_div(data.planning_signals, total_msgs_for_pct) * 100
+    followup_pct = safe_div(data.followup_signals, total_msgs_for_pct) * 100
+
     # Agentic 区块 - 显示 placeholder，实际分析由执行 agent 完成
     sample_summary = f"已抽取最近 {len(session_samples)} 个 session 样本进行复盘分析"
     agentic_section = f"""
@@ -1436,8 +1468,8 @@ def build_html_report(
           <li>综合得分: {assessment.total_score}/100 - {assessment.grade}</li>
           <li>一次达成率: {evidence.metrics.get("first_pass_rate", 0):.1%}</li>
           <li>返工率: {evidence.metrics.get("rework_rate", 0):.1%}</li>
-          <li>验证覆盖率: {evidence.metrics.get("verification_rate", 0):.1%}</li>
-          <li>规划覆盖率: {evidence.metrics.get("planning_rate", 0):.1%}</li>
+          <li>验证覆盖率: {verification_pct:.1f}% ({data.verification_signals}/{total_msgs_for_pct})</li>
+          <li>规划覆盖率: {planning_pct:.1f}% ({data.planning_signals}/{total_msgs_for_pct})</li>
           <li>高频摩擦: {", ".join([f"{k}({v})" for k, v in evidence.patterns.get("top_friction", [])[:3]]) or "无"}</li>
           <li>抽样样本数: {len(session_samples)} 个 session</li>
         </ul>
@@ -1753,6 +1785,7 @@ def main() -> None:
         return
 
     data = merge_aggregates(aggregates)
+    data.sources = sources
     locale = pick_locale(args.locale, data.language_chars, data.language_messages)
     
     # 抽样复盘：收集最近 20 个 session 的详细内容
