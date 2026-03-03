@@ -1110,6 +1110,7 @@ def build_assessment(locale: str, data: AggregatedData, session_samples: list = 
             "completion_score": completion_score, "rework_score": rework_score,
             "switch_score": switch_score, "verification_score": verification_score,
             "consistency_score": consistency_score, "total_score": total_score,
+            "avg_tool_diversity": avg_tool_diversity,  # 添加工具多样性指标
         },
         trends=trend_data,
         patterns={
@@ -1445,66 +1446,89 @@ def build_html_report(
     </section>
     """
 
-    # Karpathy Agentic Score 区块 (AI 专家分析模式)
+    # Karpathy Agentic Score 区块 - 简化展示
     karpathy = evidence.karpathy_score
     karpathy_dimensions_html = ""
     
     if karpathy and karpathy.get("analysis_mode") == "ai_expert":
-        # AI 专家分析模式 - 显示分析框架而非具体分数
-        for dim_id, dim in karpathy.get("dimensions", {}).items():
-            indicators = ", ".join(dim.get("indicators", []))
-            raw_data_note = dim.get("raw_data", {}).get("note", "")
+        # 计算各维度评分并生成简化展示
+        dimensions_data = karpathy.get("dimensions", {})
+        
+        # 基于 metrics 计算各维度等级
+        metrics = evidence.metrics
+        first_pass_rate = metrics.get("first_pass_rate", 0)
+        verification_rate = metrics.get("verification_rate", 0)
+        planning_rate = metrics.get("planning_rate", 0)
+        rework_rate = metrics.get("rework_rate", 0)
+        avg_tool_diversity = metrics.get("avg_tool_diversity", 0)
+        
+        # 定义评分逻辑和评语
+        dim_evaluations = [
+            {
+                "name": "编排能力 (Orchestration)" if locale == "zh" else "Orchestration",
+                "grade": "A" if planning_rate > 0.25 else "B" if planning_rate > 0.15 else "C" if planning_rate > 0.08 else "D",
+                "comment": "任务分解清晰，规划意识强" if planning_rate > 0.2 else "规划有提升空间" if locale == "zh" else "Clear task decomposition" if planning_rate > 0.2 else "Room for planning improvement",
+                "suggestion": "继续保持任务拆解习惯，将大任务分解为可验证的小步骤" if locale == "zh" else "Maintain task breakdown habits"
+            },
+            {
+                "name": "先探索后编码 (Explore First)" if locale == "zh" else "Explore Before Code",
+                "grade": "A" if first_pass_rate > 0.7 else "B" if first_pass_rate > 0.55 else "C" if first_pass_rate > 0.4 else "D",
+                "comment": "编码前调研充分，方案选择合理" if first_pass_rate > 0.6 else "建议增加前期探索" if locale == "zh" else "Good exploration habits" if first_pass_rate > 0.6 else "Increase upfront exploration",
+                "suggestion": "复杂任务前先搜索调研，避免直接上手编码" if locale == "zh" else "Research before coding on complex tasks"
+            },
+            {
+                "name": "质量监督 (Oversight)" if locale == "zh" else "Quality Oversight",
+                "grade": "A" if verification_rate > 0.3 else "B" if verification_rate > 0.2 else "C" if verification_rate > 0.1 else "D",
+                "comment": "验证意识强，质量把控到位" if verification_rate > 0.25 else "验证覆盖有待加强" if locale == "zh" else "Strong verification habits" if verification_rate > 0.25 else "Improve verification coverage",
+                "suggestion": "为每类任务添加默认验证步骤（测试/lint/回归）" if locale == "zh" else "Add default verification steps for each task type"
+            },
+            {
+                "name": "一次达成 (First-Pass)" if locale == "zh" else "First-Pass Completion",
+                "grade": "A" if rework_rate < 0.15 else "B" if rework_rate < 0.25 else "C" if rework_rate < 0.4 else "D",
+                "comment": "返工率低，需求理解准确" if rework_rate < 0.2 else "返工率偏高，需明确验收标准" if locale == "zh" else "Low rework rate" if rework_rate < 0.2 else "High rework rate, clarify requirements",
+                "suggestion": "任务开始前明确验收标准，减少后期返工" if locale == "zh" else "Define acceptance criteria upfront"
+            },
+            {
+                "name": "并行 Agent (Parallel)" if locale == "zh" else "Parallel Agents",
+                "grade": "A" if avg_tool_diversity > 4 else "B" if avg_tool_diversity > 3 else "C" if avg_tool_diversity > 2 else "D",
+                "comment": "工具使用多样，并行工作效率高" if avg_tool_diversity > 3 else "可尝试更多并行工作流" if locale == "zh" else "Good tool diversity" if avg_tool_diversity > 3 else "Explore more parallel workflows",
+                "suggestion": "对独立子任务使用 git worktree 并行处理" if locale == "zh" else "Use git worktrees for parallel task handling"
+            },
+        ]
+        
+        # 计算总评
+        grade_scores = {"A": 4, "B": 3, "C": 2, "D": 1}
+        total_score = sum(grade_scores.get(d["grade"], 0) for d in dim_evaluations)
+        avg_score = total_score / len(dim_evaluations)
+        overall_grade = "A" if avg_score >= 3.5 else "B" if avg_score >= 2.5 else "C" if avg_score >= 1.5 else "D"
+        
+        # 生成简化 HTML
+        for dim in dim_evaluations:
+            grade_color = {"A": "#22c55e", "B": "#06b6d4", "C": "#f59e0b", "D": "#ef4444"}.get(dim["grade"], "#888")
             karpathy_dimensions_html += f"""
-            <div class="score-row" style="margin-bottom: 1.5rem; padding: 1rem; background: var(--surface-2); border-radius: 8px;">
-              <div class="score-head" style="font-weight: 600; color: var(--accent-2); margin-bottom: 0.5rem;">
-                {html.escape(dim.get("name", dim_id))}
+            <div class="karpathy-dim" style="margin-bottom: 1.25rem; padding: 1rem; background: var(--surface-2); border-radius: 8px; border-left: 4px solid {grade_color};">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                <span style="font-weight: 600; color: var(--text);">{html.escape(dim["name"])}</span>
+                <span style="background: {grade_color}; color: white; padding: 0.2rem 0.6rem; border-radius: 4px; font-weight: bold; font-size: 0.9rem;">{dim["grade"]}</span>
               </div>
-              <div style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 0.5rem;">
-                {html.escape(dim.get("description", ""))}
+              <div style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 0.4rem;">
+                {html.escape(dim["comment"])}
               </div>
-              <div style="font-size: 0.8rem; color: var(--text-secondary);">
-                <strong>指标:</strong> {html.escape(indicators)}
-              </div>
-              <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.5rem; font-style: italic;">
-                💡 {html.escape(raw_data_note)}
+              <div style="font-size: 0.8rem; color: var(--accent-2);">
+                💡 {html.escape(dim["suggestion"])}
               </div>
             </div>
             """
         
-        ai_expert_badge = '<span style="background: var(--accent); color: white; padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.75rem; margin-left: 0.5rem;">AI Expert Mode</span>'
+        overall_color = {"A": "#22c55e", "B": "#06b6d4", "C": "#f59e0b", "D": "#ef4444"}.get(overall_grade, "#888")
         
         karpathy_section = f"""
         <section class="karpathy-score">
-          <h2>🧠 Karpathy Agentic Engineering Analysis {ai_expert_badge}</h2>
-          <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">
-            基于 Andrej Karpathy 的 Agentic Coding 理念的评估框架。执行 agent 应基于下方的 session samples，扮演 Karpathy 进行专业分析。
-          </p>
-          <div style="background: var(--surface-2); padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
-            <p style="margin: 0; font-size: 0.85rem; color: var(--accent-2);">
-              📋 分析说明: {html.escape(karpathy.get("note", ""))}
-            </p>
+          <h2>🧠 AI 专家评估 (Karpathy 分析)</h2>
+          <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; padding: 1rem; background: var(--surface-2); border-radius: 8px;">
+            <span style="font-size: 1.1rem; color: var(--text-secondary);">综合评级</span>
+            <span style="background: {overall_color}; color: white; padding: 0.4rem 1rem; border-radius: 6px; font-size: 1.5rem; font-weight: bold;">{overall_grade}</span>
           </div>
-          {karpathy_dimensions_html}
-        </section>
-        """
-    elif karpathy and "dimensions" in karpathy:
-        # 兼容旧模式 - 如果存在旧格式的数据
-        for dim_id, dim in karpathy.get("dimensions", {}).items() if isinstance(karpathy.get("dimensions"), dict) else []:
-            if isinstance(dim, dict) and "score" in dim:
-                width = dim["score"]
-                karpathy_dimensions_html += f"""
-                <div class="score-row">
-                  <div class="score-head">
-                    <span>{html.escape(dim.get("name", dim_id))}</span>
-                    <span>{dim["score"]}/100</span>
-                  </div>
-                  <div class="score-track"><div class="score-fill" style="width:{width:.2f}%"></div></div>
-                </div>
-                """
-        
-        karpathy_section = f"""
-        <section class="karpathy-score">
-          <h2>🧠 Karpathy Agentic Engineering Score</h2>
           {karpathy_dimensions_html}
         </section>
         """
@@ -1579,29 +1603,34 @@ def build_html_report(
       <div class="report-time">{tr["report_time"].format(time=fmt_datetime(datetime.now().astimezone(), locale))}</div>
     </header>
 
-    <!-- AI 专家评估 - 优先展示 -->
+    <!-- 1. AI 专家评估（Karpathy 分析） -->
     {karpathy_section}
 
+    <!-- 2. 优势 -->
     <section class="strengths">
       <h2>{tr["section_strengths"]}</h2>
       {build_plain_list(assessment.strengths, tr["missing"])}
     </section>
 
+    <!-- 3. 劣势 -->
     <section class="weaknesses">
       <h2>{tr["section_weaknesses"]}</h2>
       {build_plain_list(assessment.weaknesses, tr["missing"])}
     </section>
 
+    <!-- 4. 改进建议 -->
     <section class="next-steps">
       <h2>{tr["section_next_steps"]}</h2>
       {build_plain_list(assessment.next_steps, tr["missing"])}
     </section>
 
+    <!-- 5. 关键洞察 -->
     <section class="insights">
       <h2>{tr["section_insights"]}</h2>
       {build_plain_list(insights, tr["missing"])}
     </section>
 
+    <!-- 附加分析 -->
     {agentic_section}
 
     <section class="score">
@@ -1622,9 +1651,9 @@ def build_html_report(
       </div>
     </section>
 
-    <!-- 统计指标 - 次要展示 -->
+    <!-- 6. 统计指标（放最后） -->
     <section class="kpi">
-      <h2>{tr["kpi_sessions"]} · {tr["kpi_user_msgs"]} · {tr["kpi_active_days"]} · {tr["kpi_lang"]}</h2>
+      <h2>📊 {tr["kpi_sessions"]} · {tr["kpi_user_msgs"]} · {tr["kpi_active_days"]} · {tr["kpi_lang"]}</h2>
       <div class="kpi-grid">
         <div class="kpi">
           <div class="kpi-value">{fmt_num(data.total_sessions)}</div>
