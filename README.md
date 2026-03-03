@@ -8,6 +8,8 @@
 - 🎭 **Karpathy 专家评审**: 基于真实会话样本进行 5 维定性评价
 - 🔍 **抽样复盘**: 自动抽取最近 20 个 session，输出证据文件
 - 🧱 **证据先行**: 先取样，再由 agent 写主观评级与改进建议
+- 🛠 **落地践行建议**: 在报告中给出可执行的日常实践动作（含频率与完成标准）
+- 📚 **学习与工具建议**: 在报告中明确该学什么、可多用什么工具、怎么练
 - 🚫 **禁程序化评分**: 不输出 x/100、百分比或加权总分
 
 ## 快速开始
@@ -34,6 +36,24 @@ python3 ./scripts/render_review_html.py \
 - `artifacts/session-samples.md` - 人类可读样本摘要
 - `artifacts/usage-insights-review.md` - 最终专家评审报告（由 agent 生成）
 - `artifacts/usage-insights-review.html` - 可视化复盘页面（优缺点高亮）
+
+## 最终回复格式（对用户）
+
+- 执行完 skill 后，最终只返回 `1` 行本地 HTML 路径（建议绝对路径）
+- 不要附加任何解释、总结、评级文本
+
+## 报告必含章节
+
+- `🛠 用户践行指南`：至少 3 条动作，每条包含“执行频率 + 完成标准”
+- `📚 学习方向与工具建议`：至少 4 条，每条包含“学习主题 + 推荐工具 + 建议练习”
+
+## 默认推荐工具库
+
+- `Claude Code Agent Team / Subagents`：并行拆任务与子代理协作
+- `Claude Code /batch`（若环境可用）：批处理固定流程
+- `Skills`（Claude Code / Codex CLI）：沉淀高频工作流
+- `codex exec --full-auto`：长链路自动执行
+- `git worktree + 多会话并行`：多分支并发推进与合并决策
 
 ## 评审方式（非评分器）
 
